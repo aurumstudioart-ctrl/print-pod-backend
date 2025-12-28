@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const path = require('path'); // <--- New
 require('dotenv').config();
 
 const app = express();
@@ -8,6 +9,10 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// --- STATIC IMAGES (Images dikhane ke liye) ---
+// Jab koi '/uploads/abc.png' mangega, to hum '/app/uploads' folder se denge
+app.use('/uploads', express.static('/app/uploads'));
 
 // Database Connection
 const mongoURI = process.env.MONGO_URI;
@@ -20,10 +25,12 @@ if (!mongoURI) {
 }
 
 // Routes Import
-const authRoutes = require('./routes/auth'); // <--- Ye line nanyi hai
+const authRoutes = require('./routes/auth');
+const productRoutes = require('./routes/product'); // <--- New
 
 // Routes Use
-app.use('/api/auth', authRoutes); // <--- Ye line nanyi hai
+app.use('/api/auth', authRoutes);
+app.use('/api/product', productRoutes); // <--- New
 
 // Basic Route
 app.get('/', (req, res) => {
