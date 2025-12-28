@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # 4. Dependencies install karenge
-RUN npm install --production
+RUN npm install
 
 # 5. Baaki code copy karenge
 COPY . .
