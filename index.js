@@ -9,10 +9,31 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Basic Route (Test ke liye)
+// Database Connection
+const mongoURI = process.env.MONGO_URI;
+if (!mongoURI) {
+    console.error("❌ ERROR: MONGO_URI is not defined in CapRover!");
+} else {
+    mongoose.connect(mongoURI)
+        .then(() => console.log("✅ MongoDB Connected Successfully"))
+        .catch(err => console.error("❌ MongoDB Connection Error:", err));
+}
+
+// Routes Import
+const authRoutes = require('./routes/auth'); // <--- Ye line nanyi hai
+
+// Routes Use
+app.use('/api/auth', authRoutes); // <--- Ye line nanyi hai
+
+// Basic Route
 app.get('/', (req, res) => {
-  res.send('POD Marketplace Backend is Running! 🚀');
+  res.send('POD Marketplace Backend is Live & Connected to DB! 🚀');
 });
+
+// Import Models
+require('./models/User');
+require('./models/Product');
+require('./models/Design');
 
 // Server Start
 const PORT = process.env.PORT || 80;
