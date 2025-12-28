@@ -1,4 +1,4 @@
-name: Deploy Backend to CapRover
+name: Build and Deploy to CapRover
 
 on:
   push:
@@ -9,15 +9,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # 1. Code download karega
     - name: Checkout Code
       uses: actions/checkout@v3
 
+    # 2. Docker Hub mein Login karega
     - name: Login to Docker Hub
       uses: docker/login-action@v2
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
+    # 3. Image Build karega aur Upload karega
     - name: Build and Push Docker Image
       uses: docker/build-push-action@v4
       with:
@@ -25,8 +28,9 @@ jobs:
         push: true
         tags: gmustafa90/print-pod-backend:latest
 
+    # 4. CapRover ko signal dega (Fixed Action Name)
     - name: Deploy to CapRover
-      uses: caprover/deploy-from-image-action@v1
+      uses: caprover/deploy-from-github@v1.1.2  # <--- Ye line change ki hai
       with:
         server: ${{ secrets.CAPROVER_SERVER_URL }}
         app: 'print-api'
