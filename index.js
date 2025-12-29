@@ -68,12 +68,35 @@ app.get('/api/chat/conversations/:userId', async (req, res) => {
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
-// 3. GET MESSAGES FOR A SPECIFIC CHAT (New Route Added Here)
+// 3. GET MESSAGES FOR A SPECIFIC CHAT
 app.get('/api/chat/messages/:chatId', async (req, res) => {
   const Message = require('./models/Message');
   try {
     const messages = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
     res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. USER SEARCH API (NEW: For Admin Search Engine)
+app.get('/api/user/search', async (req, res) => {
+  const User = require('./models/User'); // User model load karein
+  const { query } = req.query;
+  
+  if (!query) return res.json([]);
+
+  try {
+    // Name ya Email mein match dhoondo (Case insensitive)
+    const users = await User.find({
+      $or: [
+        { name: { $regex: query, $options: 'i' } },
+        { email: { $regex: query, $options: 'i' } }
+      ],
+      role: { $ne: 'admin' } // Admin khud ko search na kare
+    }).select('name email role _id'); // Password mat bhejo
+    
+    res.json(users);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -108,6 +131,7 @@ io.on('connection', (socket) => {
         chat = new Chat({ participants: [senderId, receiverId] });
     }
     
+    // Last message update karein
     chat.lastMessage = text || (attachment?.type !== 'none' ? 'Sent an attachment' : 'New Message');
     chat.lastMessageTime = Date.now();
     await chat.save();
