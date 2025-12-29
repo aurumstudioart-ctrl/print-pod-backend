@@ -5,6 +5,7 @@ const http = require('http');
 const { Server } = require("socket.io"); 
 const path = require('path');
 const multer = require('multer'); 
+const fs = require('fs'); // <--- ZAROORI ADDITION
 require('dotenv').config();
 
 const app = express();
@@ -29,10 +30,20 @@ const mongoURI = process.env.MONGO_URI;
 if (!mongoURI) console.error("❌ MONGO_URI missing");
 else mongoose.connect(mongoURI).then(() => console.log("✅ MongoDB Connected"));
 
-// --- FILE UPLOAD ---
+// --- ROBUST UPLOAD SETUP ---
+const uploadDir = '/app/uploads';
+// Agar folder nahi hai to banao (Fix for upload crash)
+if (!fs.existsSync(uploadDir)){
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
 const chatUploadStorage = multer.diskStorage({
-  destination: function (req, file, cb) { cb(null, '/app/uploads'); }, 
-  filename: function (req, file, cb) { cb(null, 'chat-' + Date.now() + path.extname(file.originalname)); }
+  destination: function (req, file, cb) { cb(null, uploadDir); }, 
+  filename: function (req, file, cb) { 
+    // Spaces hatakar clean naam rakho
+    const cleanName = file.originalname.replace(/\s+/g, '-');
+    cb(null, 'chat-' + Date.now() + '-' + cleanName); 
+  }
 });
 const chatUpload = multer({ storage: chatUploadStorage });
 
@@ -40,13 +51,17 @@ const chatUpload = multer({ storage: chatUploadStorage });
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// 1. Chat Upload
+// 1. Chat Upload Route (Fix)
 app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).send("No file uploaded");
+  if (!req.file) {
+      console.error("Upload Attempt Failed: No file received");
+      return res.status(400).send("No file uploaded");
+  }
+  console.log("File Uploaded:", req.file.filename); // Debug log
   res.json({ filePath: req.file.filename });
 });
 
-// 2. Get Conversations
+// 2. Conversations
 app.get('/api/chat/conversations/:userId', async (req, res) => {
   const Chat = require('./models/Chat');
   require('./models/Message'); 
@@ -58,7 +73,7 @@ app.get('/api/chat/conversations/:userId', async (req, res) => {
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
-// 3. Get Messages
+// 3. Messages
 app.get('/api/chat/messages/:chatId', async (req, res) => {
   const Message = require('./models/Message');
   try {
@@ -81,7 +96,7 @@ app.get('/api/user/search', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 5. WALLET SYSTEM APIS 💰
+// 5. Wallet APIs
 app.get('/api/wallet/:userId', async (req, res) => {
     const User = require('./models/User');
     try {
@@ -109,7 +124,7 @@ app.post('/api/wallet/pay', async (req, res) => {
     res.json({ message: "Payment Verified" });
 });
 
-// 6. WITHDRAWAL SYSTEM APIS 🏦
+// 6. Withdrawal APIs
 app.post('/api/wallet/withdraw', async (req, res) => {
     const { userId, amount } = req.body;
     const User = require('./models/User');
@@ -154,7 +169,7 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     res.json({ message: `Request ${action.toUpperCase()} Successfully!` });
 });
 
-// 7. ADMIN STATS API (New Added) 📊
+// 7. Admin Stats
 app.get('/api/admin/stats', async (req, res) => {
     const User = require('./models/User');
     const Withdrawal = require('./models/Withdrawal');
@@ -202,7 +217,10 @@ io.on('connection', (socket) => {
     const newMessage = new Message({ chatId: chat._id, sender: senderId, text, attachment });
     await newMessage.save();
 
+    // Emit to Receiver
     io.to(receiverId).emit('receive_message', newMessage);
+    
+    // Notification Trigger
     io.to(receiverId).emit('notification', { from: senderId });
   });
 });
