@@ -4,12 +4,18 @@ const messageSchema = new mongoose.Schema({
   chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat' },
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   text: { type: String },
-  // Special Attachments (Jo aapne manga)
   attachment: {
-    type: { type: String, enum: ['image', 'design_info', 'none'], default: 'none' },
-    designImage: String, // Final Design
-    productLink: String, // Blank Product
-    usedAssets: [String] // Jo elements use huye
+    type: { type: String, enum: ['image', 'design_info', 'chat_image', 'none'], default: 'none' },
+    designImage: String, 
+    productLink: String,
+    usedAssets: [String],
+    orderDetails: String
+  },
+  // --- NEW FIELD FOR TICKS ---
+  status: { 
+    type: String, 
+    enum: ['sent', 'delivered', 'seen'], 
+    default: 'sent' 
   },
   createdAt: { type: Date, default: Date.now }
 });

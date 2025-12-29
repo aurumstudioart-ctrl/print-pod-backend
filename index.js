@@ -15,16 +15,14 @@ const server = http.createServer(app);
 const PHONE_REGEX = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
-// Socket.io Setup (Increased Buffer for Images)
+// Socket.io Setup
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB Allow
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// Middleware (Increased Limits for Base64 Images)
+// Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json());
 app.use('/uploads', express.static('/app/uploads'));
 
 // DB Connection
@@ -32,30 +30,30 @@ const mongoURI = process.env.MONGO_URI;
 if (!mongoURI) console.error("❌ MONGO_URI missing");
 else mongoose.connect(mongoURI).then(() => console.log("✅ MongoDB Connected"));
 
-// --- UPLOAD SETUP (Product Images etc) ---
+// --- UPLOAD SETUP ---
 const uploadDir = '/app/uploads';
 if (!fs.existsSync(uploadDir)){
     fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-const productStorage = multer.diskStorage({
+const chatUploadStorage = multer.diskStorage({
   destination: function (req, file, cb) { cb(null, uploadDir); }, 
   filename: function (req, file, cb) { 
     const cleanName = file.originalname.replace(/\s+/g, '-');
-    cb(null, 'prod-' + Date.now() + '-' + cleanName); 
+    cb(null, 'chat-' + Date.now() + '-' + cleanName); 
   }
 });
-const upload = multer({ storage: productStorage });
+const chatUpload = multer({ storage: chatUploadStorage });
 
 // --- ROUTES ---
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// 1. Product/General Upload
-app.post('/api/chat/upload', upload.single('file'), (req, res) => {
-  // Note: Chat images ab Socket se Base64 mein jayengi, ye route backup hai
+// 1. Chat Upload Route
+app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).send("No file uploaded");
-  res.json({ filePath: req.file.filename });
+  const fileUrl = `http://print-api.129.80.92.53.nip.io/uploads/${req.file.filename}`;
+  res.json({ filePath: fileUrl });
 });
 
 // 2. Get Conversations
@@ -115,7 +113,7 @@ app.post('/api/wallet/pay', async (req, res) => {
     const user = await User.findById(userId);
     
     if (!user || user.walletBalance < amount) {
-        return res.status(400).json({ message: "Insufficient Funds! Please Top-up Wallet." });
+        return res.status(400).json({ message: "Insufficient Funds!" });
     }
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     res.json({ message: "Payment Verified" });
@@ -132,12 +130,11 @@ app.post('/api/wallet/withdraw', async (req, res) => {
         return res.status(400).json({ message: "Insufficient Balance!" });
     }
     
-    // Hold Amount Immediately
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
 
     const newRequest = new Withdrawal({ user: userId, amount, status: 'pending' });
     await newRequest.save();
-    res.json({ message: "Withdrawal Request Sent to Admin!" });
+    res.json({ message: "Withdrawal Request Sent!" });
 });
 
 app.get('/api/admin/withdrawals', async (req, res) => {
@@ -156,12 +153,9 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     const User = require('./models/User');
 
     const request = await Withdrawal.findById(id);
-    if (!request || request.status !== 'pending') {
-        return res.status(400).json({ message: "Invalid Request" });
-    }
+    if (!request || request.status !== 'pending') return res.status(400).json({ message: "Invalid Request" });
 
     if (action === 'rejected') {
-        // Refund on Reject
         await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
     }
 
@@ -170,30 +164,19 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     res.json({ message: `Request ${action.toUpperCase()} Successfully!` });
 });
 
-// 7. Admin Stats
+// 7. Stats APIs
 app.get('/api/admin/stats', async (req, res) => {
     const User = require('./models/User');
     const Withdrawal = require('./models/Withdrawal');
-    
     try {
         const totalSellers = await User.countDocuments({ role: 'seller' });
         const totalSuppliers = await User.countDocuments({ role: 'supplier' });
         const pendingWithdrawals = await Withdrawal.countDocuments({ status: 'pending' });
-        const totalPayouts = await Withdrawal.aggregate([
-            { $match: { status: 'approved' } },
-            { $group: { _id: null, total: { $sum: "$amount" } } }
-        ]);
-
-        res.json({
-            sellers: totalSellers || 0,
-            suppliers: totalSuppliers || 0,
-            pending: pendingWithdrawals || 0,
-            payouts: totalPayouts[0]?.total || 0
-        });
+        const totalPayouts = await Withdrawal.aggregate([{ $match: { status: 'approved' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
+        res.json({ sellers: totalSellers, suppliers: totalSuppliers, pending: pendingWithdrawals, payouts: totalPayouts[0]?.total || 0 });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 8. Supplier Stats
 app.get('/api/supplier/stats/:id', async (req, res) => {
     const Product = require('./models/Product');
     const User = require('./models/User');
@@ -202,18 +185,9 @@ app.get('/api/supplier/stats/:id', async (req, res) => {
         const supplierId = req.params.id;
         const totalProducts = await Product.countDocuments({ supplier: supplierId });
         const user = await User.findById(supplierId);
-        const withdrawals = await Withdrawal.aggregate([
-            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
-            { $group: { _id: null, total: { $sum: "$amount" } } }
-        ]);
+        const withdrawals = await Withdrawal.aggregate([{ $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
         const pending = await Withdrawal.countDocuments({ user: supplierId, status: 'pending' });
-
-        res.json({
-            products: totalProducts || 0,
-            balance: user ? user.walletBalance : 0,
-            withdrawn: withdrawals[0]?.total || 0,
-            pendingRequests: pending || 0
-        });
+        res.json({ products: totalProducts, balance: user ? user.walletBalance : 0, withdrawn: withdrawals[0]?.total || 0, pendingRequests: pending });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -221,10 +195,10 @@ app.get('/api/supplier/stats/:id', async (req, res) => {
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => { socket.join(userId); });
 
+  // A. Message Sending
   socket.on('send_message', async (data) => {
     const { senderId, receiverId, text, attachment } = data;
 
-    // Security Check
     if (text && (PHONE_REGEX.test(text) || EMAIL_REGEX.test(text))) {
         io.to(senderId).emit('error_message', "⚠️ SECURITY: Sharing contact info is prohibited.");
         return; 
@@ -236,16 +210,39 @@ io.on('connection', (socket) => {
     let chat = await Chat.findOne({ participants: { $all: [senderId, receiverId] } });
     if (!chat) chat = new Chat({ participants: [senderId, receiverId] });
     
-    chat.lastMessage = text || (attachment?.type !== 'none' ? '📷 Sent an image' : 'New Message');
+    chat.lastMessage = text || (attachment?.type !== 'none' ? '📷 Photo' : 'New Message');
     chat.lastMessageTime = Date.now();
     await chat.save();
 
-    const newMessage = new Message({ chatId: chat._id, sender: senderId, text, attachment });
+    const newMessage = new Message({ 
+        chatId: chat._id, 
+        sender: senderId, 
+        text, 
+        attachment,
+        status: 'delivered' // Saved on server
+    });
     await newMessage.save();
 
-    // Direct Emit (Including Base64 Image)
     io.to(receiverId).emit('receive_message', newMessage);
     io.to(receiverId).emit('notification', { from: senderId });
+  });
+
+  // B. Message Read Logic
+  socket.on('mark_read', async (data) => {
+    const { chatId, userId } = data; 
+    const Message = require('./models/Message');
+
+    await Message.updateMany(
+        { chatId: chatId, sender: { $ne: userId }, status: { $ne: 'seen' } },
+        { $set: { status: 'seen' } }
+    );
+
+    const Chat = require('./models/Chat');
+    const chat = await Chat.findById(chatId);
+    if(chat) {
+        const otherUser = chat.participants.find(p => p.toString() !== userId);
+        if(otherUser) io.to(otherUser.toString()).emit('messages_seen', { chatId });
+    }
   });
 });
 
