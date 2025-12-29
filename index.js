@@ -5,7 +5,7 @@ const http = require('http');
 const { Server } = require("socket.io"); 
 const path = require('path');
 const multer = require('multer'); 
-const fs = require('fs'); // <--- ZAROORI ADDITION
+const fs = require('fs'); 
 require('dotenv').config();
 
 const app = express();
@@ -32,7 +32,6 @@ else mongoose.connect(mongoURI).then(() => console.log("✅ MongoDB Connected"))
 
 // --- ROBUST UPLOAD SETUP ---
 const uploadDir = '/app/uploads';
-// Agar folder nahi hai to banao (Fix for upload crash)
 if (!fs.existsSync(uploadDir)){
     fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -40,7 +39,6 @@ if (!fs.existsSync(uploadDir)){
 const chatUploadStorage = multer.diskStorage({
   destination: function (req, file, cb) { cb(null, uploadDir); }, 
   filename: function (req, file, cb) { 
-    // Spaces hatakar clean naam rakho
     const cleanName = file.originalname.replace(/\s+/g, '-');
     cb(null, 'chat-' + Date.now() + '-' + cleanName); 
   }
@@ -51,13 +49,10 @@ const chatUpload = multer({ storage: chatUploadStorage });
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// 1. Chat Upload Route (Fix)
+// 1. Chat Upload Route
 app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
-  if (!req.file) {
-      console.error("Upload Attempt Failed: No file received");
-      return res.status(400).send("No file uploaded");
-  }
-  console.log("File Uploaded:", req.file.filename); // Debug log
+  if (!req.file) return res.status(400).send("No file uploaded");
+  console.log("File Uploaded:", req.file.filename);
   res.json({ filePath: req.file.filename });
 });
 
@@ -169,11 +164,10 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     res.json({ message: `Request ${action.toUpperCase()} Successfully!` });
 });
 
-// 7. Admin Stats
+// 7. Admin Stats API
 app.get('/api/admin/stats', async (req, res) => {
     const User = require('./models/User');
     const Withdrawal = require('./models/Withdrawal');
-    
     try {
         const totalSellers = await User.countDocuments({ role: 'seller' });
         const totalSuppliers = await User.countDocuments({ role: 'supplier' });
@@ -182,12 +176,35 @@ app.get('/api/admin/stats', async (req, res) => {
             { $match: { status: 'approved' } },
             { $group: { _id: null, total: { $sum: "$amount" } } }
         ]);
-
         res.json({
             sellers: totalSellers,
             suppliers: totalSuppliers,
             pending: pendingWithdrawals,
             payouts: totalPayouts[0]?.total || 0
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// 8. SUPPLIER SPECIFIC STATS API (New Added)
+app.get('/api/supplier/stats/:id', async (req, res) => {
+    const Product = require('./models/Product');
+    const User = require('./models/User');
+    const Withdrawal = require('./models/Withdrawal');
+    try {
+        const supplierId = req.params.id;
+        const totalProducts = await Product.countDocuments({ supplier: supplierId });
+        const user = await User.findById(supplierId);
+        const withdrawals = await Withdrawal.aggregate([
+            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        const pending = await Withdrawal.countDocuments({ user: supplierId, status: 'pending' });
+
+        res.json({
+            products: totalProducts,
+            balance: user.walletBalance || 0,
+            withdrawn: withdrawals[0]?.total || 0,
+            pendingRequests: pending
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -217,10 +234,7 @@ io.on('connection', (socket) => {
     const newMessage = new Message({ chatId: chat._id, sender: senderId, text, attachment });
     await newMessage.save();
 
-    // Emit to Receiver
     io.to(receiverId).emit('receive_message', newMessage);
-    
-    // Notification Trigger
     io.to(receiverId).emit('notification', { from: senderId });
   });
 });
