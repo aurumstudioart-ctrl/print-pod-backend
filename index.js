@@ -68,6 +68,17 @@ app.get('/api/chat/conversations/:userId', async (req, res) => {
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
+// 3. GET MESSAGES FOR A SPECIFIC CHAT (New Route Added Here)
+app.get('/api/chat/messages/:chatId', async (req, res) => {
+  const Message = require('./models/Message');
+  try {
+    const messages = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- REAL-TIME CHAT LOGIC (STRICT MODE) ---
 io.on('connection', (socket) => {
   console.log('User Connected:', socket.id);
