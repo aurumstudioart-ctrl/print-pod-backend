@@ -11,14 +11,20 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-// --- SECURITY ---
+// --- SECURITY CONSTANTS ---
 const PHONE_REGEX = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
-const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
+// Socket.io Setup (Increased Buffer for Images)
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  maxHttpBufferSize: 5e7 // 50 MB Allow
+});
 
+// Middleware (Increased Limits for Base64 Images)
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static('/app/uploads'));
 
 // DB Connection
@@ -26,40 +32,45 @@ const mongoURI = process.env.MONGO_URI;
 if (!mongoURI) console.error("❌ MONGO_URI missing");
 else mongoose.connect(mongoURI).then(() => console.log("✅ MongoDB Connected"));
 
-// Upload Setup
+// --- UPLOAD SETUP (Product Images etc) ---
 const uploadDir = '/app/uploads';
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync(uploadDir)){
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
 
-const chatUploadStorage = multer.diskStorage({
+const productStorage = multer.diskStorage({
   destination: function (req, file, cb) { cb(null, uploadDir); }, 
   filename: function (req, file, cb) { 
     const cleanName = file.originalname.replace(/\s+/g, '-');
-    cb(null, 'chat-' + Date.now() + '-' + cleanName); 
+    cb(null, 'prod-' + Date.now() + '-' + cleanName); 
   }
 });
-const chatUpload = multer({ storage: chatUploadStorage });
+const upload = multer({ storage: productStorage });
 
 // --- ROUTES ---
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// 1. Chat Upload
-app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
+// 1. Product/General Upload
+app.post('/api/chat/upload', upload.single('file'), (req, res) => {
+  // Note: Chat images ab Socket se Base64 mein jayengi, ye route backup hai
   if (!req.file) return res.status(400).send("No file uploaded");
   res.json({ filePath: req.file.filename });
 });
 
-// 2. Conversations
+// 2. Get Conversations
 app.get('/api/chat/conversations/:userId', async (req, res) => {
-  const Chat = require('./models/Chat'); require('./models/Message'); 
+  const Chat = require('./models/Chat');
+  require('./models/Message'); 
   try {
     const chats = await Chat.find({ participants: req.params.userId })
-      .populate('participants', 'name email role').sort({ lastMessageTime: -1 });
+      .populate('participants', 'name email role')
+      .sort({ lastMessageTime: -1 });
     res.json(chats);
   } catch (err) { res.status(500).json({error: err.message}); }
 });
 
-// 3. Messages
+// 3. Get Messages
 app.get('/api/chat/messages/:chatId', async (req, res) => {
   const Message = require('./models/Message');
   try {
@@ -87,7 +98,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
     const User = require('./models/User');
     try {
         const user = await User.findById(req.params.userId);
-        res.json({ balance: user ? user.walletBalance : 0 });
+        res.json({ balance: user.walletBalance || 0 });
     } catch (err) { res.status(500).json({ error: "User not found" }); }
 });
 
@@ -104,30 +115,29 @@ app.post('/api/wallet/pay', async (req, res) => {
     const user = await User.findById(userId);
     
     if (!user || user.walletBalance < amount) {
-        return res.status(400).json({ message: "Insufficient Funds!" });
+        return res.status(400).json({ message: "Insufficient Funds! Please Top-up Wallet." });
     }
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     res.json({ message: "Payment Verified" });
 });
 
-// 6. WITHDRAWAL SYSTEM (UPDATED LOGIC) 🏦
+// 6. Withdrawal APIs
 app.post('/api/wallet/withdraw', async (req, res) => {
     const { userId, amount } = req.body;
     const User = require('./models/User');
     const Withdrawal = require('./models/Withdrawal');
 
     const user = await User.findById(userId);
-    if (!user || user.walletBalance < amount) {
+    if (user.walletBalance < amount) {
         return res.status(400).json({ message: "Insufficient Balance!" });
     }
-
-    // --- LOGIC CHANGE: Deduct money IMMEDIATELY (Hold) ---
+    
+    // Hold Amount Immediately
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
 
     const newRequest = new Withdrawal({ user: userId, amount, status: 'pending' });
     await newRequest.save();
-    
-    res.json({ message: "Withdrawal Request Sent! Funds placed on hold." });
+    res.json({ message: "Withdrawal Request Sent to Admin!" });
 });
 
 app.get('/api/admin/withdrawals', async (req, res) => {
@@ -141,7 +151,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
 });
 
 app.post('/api/admin/withdrawals/action', async (req, res) => {
-    const { id, action } = req.body; // action = 'approved' | 'rejected'
+    const { id, action } = req.body; 
     const Withdrawal = require('./models/Withdrawal');
     const User = require('./models/User');
 
@@ -150,29 +160,25 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
         return res.status(400).json({ message: "Invalid Request" });
     }
 
-    // --- LOGIC CHANGE: Handle Refund on Rejection ---
     if (action === 'rejected') {
-        // Refund money back to user wallet
+        // Refund on Reject
         await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
     }
-    // If approved, do nothing (Money was already deducted in 'withdraw' step)
 
     request.status = action;
     await request.save();
     res.json({ message: `Request ${action.toUpperCase()} Successfully!` });
 });
 
-// 7. ADMIN STATS API (Fixed Logic) 📊
+// 7. Admin Stats
 app.get('/api/admin/stats', async (req, res) => {
     const User = require('./models/User');
     const Withdrawal = require('./models/Withdrawal');
     
     try {
-        // Explicitly count documents to ensure numbers are returned
         const totalSellers = await User.countDocuments({ role: 'seller' });
         const totalSuppliers = await User.countDocuments({ role: 'supplier' });
         const pendingWithdrawals = await Withdrawal.countDocuments({ status: 'pending' });
-        
         const totalPayouts = await Withdrawal.aggregate([
             { $match: { status: 'approved' } },
             { $group: { _id: null, total: { $sum: "$amount" } } }
@@ -184,13 +190,10 @@ app.get('/api/admin/stats', async (req, res) => {
             pending: pendingWithdrawals || 0,
             payouts: totalPayouts[0]?.total || 0
         });
-    } catch (err) { 
-        console.error("Stats Error:", err);
-        res.status(500).json({ error: err.message }); 
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 8. Supplier Specific Stats
+// 8. Supplier Stats
 app.get('/api/supplier/stats/:id', async (req, res) => {
     const Product = require('./models/Product');
     const User = require('./models/User');
@@ -221,6 +224,7 @@ io.on('connection', (socket) => {
   socket.on('send_message', async (data) => {
     const { senderId, receiverId, text, attachment } = data;
 
+    // Security Check
     if (text && (PHONE_REGEX.test(text) || EMAIL_REGEX.test(text))) {
         io.to(senderId).emit('error_message', "⚠️ SECURITY: Sharing contact info is prohibited.");
         return; 
@@ -232,13 +236,14 @@ io.on('connection', (socket) => {
     let chat = await Chat.findOne({ participants: { $all: [senderId, receiverId] } });
     if (!chat) chat = new Chat({ participants: [senderId, receiverId] });
     
-    chat.lastMessage = text || (attachment?.type !== 'none' ? 'Sent an attachment' : 'New Message');
+    chat.lastMessage = text || (attachment?.type !== 'none' ? '📷 Sent an image' : 'New Message');
     chat.lastMessageTime = Date.now();
     await chat.save();
 
     const newMessage = new Message({ chatId: chat._id, sender: senderId, text, attachment });
     await newMessage.save();
 
+    // Direct Emit (Including Base64 Image)
     io.to(receiverId).emit('receive_message', newMessage);
     io.to(receiverId).emit('notification', { from: senderId });
   });
