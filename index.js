@@ -81,7 +81,7 @@ app.get('/api/user/search', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 5. WALLET SYSTEM APIS (NEW) 💰
+// 5. WALLET SYSTEM APIS 💰
 app.get('/api/wallet/:userId', async (req, res) => {
     const User = require('./models/User');
     try {
@@ -107,6 +107,51 @@ app.post('/api/wallet/pay', async (req, res) => {
     }
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     res.json({ message: "Payment Verified" });
+});
+
+// 6. WITHDRAWAL SYSTEM APIS (NEW) 🏦
+app.post('/api/wallet/withdraw', async (req, res) => {
+    const { userId, amount } = req.body;
+    const User = require('./models/User');
+    const Withdrawal = require('./models/Withdrawal');
+
+    const user = await User.findById(userId);
+    if (user.walletBalance < amount) {
+        return res.status(400).json({ message: "Insufficient Balance!" });
+    }
+
+    const newRequest = new Withdrawal({ user: userId, amount, status: 'pending' });
+    await newRequest.save();
+    res.json({ message: "Withdrawal Request Sent to Admin!" });
+});
+
+app.get('/api/admin/withdrawals', async (req, res) => {
+    const Withdrawal = require('./models/Withdrawal');
+    try {
+        const requests = await Withdrawal.find()
+            .populate('user', 'name email role walletBalance')
+            .sort({ createdAt: -1 });
+        res.json(requests);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/withdrawals/action', async (req, res) => {
+    const { id, action } = req.body; 
+    const Withdrawal = require('./models/Withdrawal');
+    const User = require('./models/User');
+
+    const request = await Withdrawal.findById(id);
+    if (!request || request.status !== 'pending') {
+        return res.status(400).json({ message: "Invalid Request" });
+    }
+
+    if (action === 'approved') {
+        await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: -request.amount } });
+    }
+
+    request.status = action;
+    await request.save();
+    res.json({ message: `Request ${action.toUpperCase()} Successfully!` });
 });
 
 // --- SOCKET LOGIC ---
