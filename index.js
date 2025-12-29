@@ -109,7 +109,7 @@ app.post('/api/wallet/pay', async (req, res) => {
     res.json({ message: "Payment Verified" });
 });
 
-// 6. WITHDRAWAL SYSTEM APIS (NEW) 🏦
+// 6. WITHDRAWAL SYSTEM APIS 🏦
 app.post('/api/wallet/withdraw', async (req, res) => {
     const { userId, amount } = req.body;
     const User = require('./models/User');
@@ -152,6 +152,29 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     request.status = action;
     await request.save();
     res.json({ message: `Request ${action.toUpperCase()} Successfully!` });
+});
+
+// 7. ADMIN STATS API (New Added) 📊
+app.get('/api/admin/stats', async (req, res) => {
+    const User = require('./models/User');
+    const Withdrawal = require('./models/Withdrawal');
+    
+    try {
+        const totalSellers = await User.countDocuments({ role: 'seller' });
+        const totalSuppliers = await User.countDocuments({ role: 'supplier' });
+        const pendingWithdrawals = await Withdrawal.countDocuments({ status: 'pending' });
+        const totalPayouts = await Withdrawal.aggregate([
+            { $match: { status: 'approved' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+
+        res.json({
+            sellers: totalSellers,
+            suppliers: totalSuppliers,
+            pending: pendingWithdrawals,
+            payouts: totalPayouts[0]?.total || 0
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- SOCKET LOGIC ---
