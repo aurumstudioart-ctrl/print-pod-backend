@@ -10,7 +10,7 @@ const userSchema = new mongoose.Schema({
     default: 'seller' 
   },
   storeName: { type: String },
-  walletBalance: { type: Number, default: 0 },
+  walletBalance: { type: Number, default: 0.00 }, // Default 0
   createdAt: { type: Date, default: Date.now }
 });
 
