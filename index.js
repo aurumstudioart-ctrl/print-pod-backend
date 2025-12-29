@@ -17,12 +17,14 @@ const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 // Socket.io Setup
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  maxHttpBufferSize: 5e7 
 });
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static('/app/uploads'));
 
 // DB Connection
@@ -32,9 +34,7 @@ else mongoose.connect(mongoURI).then(() => console.log("✅ MongoDB Connected"))
 
 // --- UPLOAD SETUP ---
 const uploadDir = '/app/uploads';
-if (!fs.existsSync(uploadDir)){
-    fs.mkdirSync(uploadDir, { recursive: true });
-}
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 const chatUploadStorage = multer.diskStorage({
   destination: function (req, file, cb) { cb(null, uploadDir); }, 
@@ -111,10 +111,7 @@ app.post('/api/wallet/pay', async (req, res) => {
     const { userId, amount } = req.body;
     const User = require('./models/User');
     const user = await User.findById(userId);
-    
-    if (!user || user.walletBalance < amount) {
-        return res.status(400).json({ message: "Insufficient Funds!" });
-    }
+    if (!user || user.walletBalance < amount) return res.status(400).json({ message: "Insufficient Funds!" });
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     res.json({ message: "Payment Verified" });
 });
@@ -124,14 +121,10 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     const { userId, amount } = req.body;
     const User = require('./models/User');
     const Withdrawal = require('./models/Withdrawal');
-
     const user = await User.findById(userId);
-    if (user.walletBalance < amount) {
-        return res.status(400).json({ message: "Insufficient Balance!" });
-    }
+    if (user.walletBalance < amount) return res.status(400).json({ message: "Insufficient Balance!" });
     
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
-
     const newRequest = new Withdrawal({ user: userId, amount, status: 'pending' });
     await newRequest.save();
     res.json({ message: "Withdrawal Request Sent!" });
@@ -151,20 +144,16 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     const { id, action } = req.body; 
     const Withdrawal = require('./models/Withdrawal');
     const User = require('./models/User');
-
     const request = await Withdrawal.findById(id);
     if (!request || request.status !== 'pending') return res.status(400).json({ message: "Invalid Request" });
 
-    if (action === 'rejected') {
-        await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
-    }
-
+    if (action === 'rejected') await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
     request.status = action;
     await request.save();
     res.json({ message: `Request ${action.toUpperCase()} Successfully!` });
 });
 
-// 7. Stats APIs
+// 7. Admin Stats
 app.get('/api/admin/stats', async (req, res) => {
     const User = require('./models/User');
     const Withdrawal = require('./models/Withdrawal');
@@ -177,6 +166,7 @@ app.get('/api/admin/stats', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// 8. Supplier Stats
 app.get('/api/supplier/stats/:id', async (req, res) => {
     const Product = require('./models/Product');
     const User = require('./models/User');
@@ -191,11 +181,37 @@ app.get('/api/supplier/stats/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// 9. UNREAD COUNT API (NEW 🔥)
+app.get('/api/chat/unread/:userId', async (req, res) => {
+  const Chat = require('./models/Chat');
+  const Message = require('./models/Message');
+  try {
+    const chats = await Chat.find({ participants: req.params.userId });
+    const chatIds = chats.map(c => c._id);
+
+    // Count messages where sender is NOT me and status is NOT seen
+    const unreadMessages = await Message.find({
+        chatId: { $in: chatIds },
+        sender: { $ne: req.params.userId },
+        status: { $ne: 'seen' }
+    });
+
+    const unreadMap = {};
+    let totalUnread = 0;
+    unreadMessages.forEach(msg => {
+        const cId = msg.chatId.toString();
+        unreadMap[cId] = (unreadMap[cId] || 0) + 1;
+        totalUnread++;
+    });
+
+    res.json({ total: totalUnread, perChat: unreadMap });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- SOCKET LOGIC ---
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => { socket.join(userId); });
 
-  // A. Message Sending
   socket.on('send_message', async (data) => {
     const { senderId, receiverId, text, attachment } = data;
 
@@ -219,24 +235,23 @@ io.on('connection', (socket) => {
         sender: senderId, 
         text, 
         attachment,
-        status: 'delivered' // Saved on server
+        status: 'delivered' 
     });
     await newMessage.save();
 
     io.to(receiverId).emit('receive_message', newMessage);
-    io.to(receiverId).emit('notification', { from: senderId });
+    
+    // NOTIFICATION PAYLOAD UPDATED 🔥
+    io.to(receiverId).emit('notification', { from: senderId, chatId: chat._id });
   });
 
-  // B. Message Read Logic
   socket.on('mark_read', async (data) => {
     const { chatId, userId } = data; 
     const Message = require('./models/Message');
-
     await Message.updateMany(
         { chatId: chatId, sender: { $ne: userId }, status: { $ne: 'seen' } },
         { $set: { status: 'seen' } }
     );
-
     const Chat = require('./models/Chat');
     const chat = await Chat.findById(chatId);
     if(chat) {
