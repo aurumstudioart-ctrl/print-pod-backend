@@ -64,11 +64,10 @@ const chatUpload = multer({
 });
 
 // --- 4. BASIC ROUTES ---
-app.get('/', (req, res) => res.status(200).send('🚀 Master Node Active | v2.2 (Unread & Stats Fixed)'));
+app.get('/', (req, res) => res.status(200).send('🚀 Master Node Active | v2.2 (Marketplace Fixed)'));
 app.use('/api/auth', require('./routes/auth'));
 
 // --- 5. PRODUCT ENGINE (Copyright & Upload) ---
-
 app.post('/api/product/add', upload.single('image'), async (req, res) => {
     try {
         const { name, description, basePrice, supplierId, category, tags, variations, source, isPhysical } = req.body;
@@ -109,22 +108,29 @@ app.post('/api/product/add', upload.single('image'), async (req, res) => {
     }
 });
 
-// --- 6. SMART ALGORITHM & SEARCH ---
-
+// --- 6. SMART SEARCH (Updated for Marketplace) ---
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
-        let query = { status: 'approved' };
-        if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
+        // 💡 Marketplace Standard: Only showing approved products
+        let query = { status: 'approved' }; 
+
+        if (q) {
+            query.$or = [
+                { name: { $regex: q, $options: 'i' } },
+                { tags: { $in: [new RegExp(q, 'i')] } }
+            ];
+        }
         if (category && category !== 'All') query.category = category;
 
         const products = await Product.find(query).populate('supplier', 'name').lean();
-        const now = Date.now();
-
+        
         const results = products.map(p => {
+            const now = Date.now();
             const recentViews = (p.views24h || []).filter(v => new Date(v) > (now - 86400000)).length;
             const score = (recentViews * 2) + ((p.salesCount || 0) * 10) + (p.source === 'handmade' ? 50 : 0);
             
+            // Re-adding Badge Logic for UI compatibility
             let badge = null;
             if (p.salesCount > 20) badge = { text: "Best Seller", color: "bg-amber-500", icon: "🏆" };
             else if (recentViews > 15) badge = { text: "Hot Choice", color: "bg-orange-600", icon: "🔥" };
@@ -133,9 +139,8 @@ app.get('/api/products/search', async (req, res) => {
             return { ...p, recentViews, score, liveBadge: badge };
         }).sort((a, b) => b.score - a.score);
 
-        if (q && products.length > 0) await Product.findByIdAndUpdate(products[0]._id, { $inc: { searchCount: 1 } });
         res.json(results);
-    } catch (err) { res.status(500).send(err.message); }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/products/track-visit', async (req, res) => {
@@ -168,7 +173,6 @@ app.get('/api/products/reviews/:id', async (req, res) => {
 });
 
 // --- 7. WALLET & FINANCIALS ---
-
 app.get('/api/wallet/:userId', async (req, res) => {
     const user = await User.findById(req.params.userId);
     res.json({ balance: user ? user.walletBalance : 0 });
@@ -193,38 +197,27 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     res.json({ message: "Updated" });
 });
 
-// --- 8. STATS & ANALYTICS ---
-
-// ✅ FIXED: SUPPLIER STATS (Validates ID)
+// --- 8. STATS & ANALYTICS (Updated Supplier Stats) ---
 app.get('/api/supplier/stats/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
+        if (!supplierId || supplierId === 'undefined') return res.status(400).json({ error: "ID missing" });
 
-        // Validation Check
-        if (!supplierId || supplierId === 'undefined') {
-            return res.status(400).json({ error: "Invalid Supplier ID" });
-        }
-
-        const prodCount = await Product.countDocuments({ supplier: supplierId });
+        const products = await Product.countDocuments({ supplier: supplierId });
         const user = await User.findById(supplierId);
-        
-        const paidOut = await Withdrawal.aggregate([
+        const withdrawals = await Withdrawal.aggregate([
             { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
             { $group: { _id: null, total: { $sum: "$amount" } } }
         ]);
-        
         const pending = await Withdrawal.countDocuments({ user: supplierId, status: 'pending' });
 
         res.json({ 
-            products: prodCount || 0, 
-            balance: user ? user.walletBalance : 0, 
-            withdrawn: paidOut[0]?.total || 0, 
-            pendingRequests: pending || 0 
+            products, 
+            balance: user?.walletBalance || 0, 
+            withdrawn: withdrawals[0]?.total || 0, 
+            pendingRequests: pending 
         });
-    } catch (err) { 
-        console.error("❌ Supplier Stats Error:", err.message);
-        res.status(500).json({ error: err.message }); 
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Admin Stats
@@ -245,7 +238,6 @@ app.get('/api/admin/detailed-stats', async (req, res) => {
 });
 
 // --- 9. ORDER SYSTEM ---
-
 app.post('/api/orders/create', async (req, res) => {
     try {
         const newOrder = new Order(req.body);
@@ -271,7 +263,6 @@ app.patch('/api/orders/status', async (req, res) => {
 });
 
 // --- 10. CHAT SYSTEM ---
-
 app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).send("File missing");
     res.json({ filePath: `http://print-api.129.80.92.53.nip.io/uploads/${req.file.filename}` });
@@ -287,14 +278,11 @@ app.get('/api/chat/messages/:chatId', async (req, res) => {
     res.json(data);
 });
 
-// ✅ FIXED: UNREAD MESSAGES LOGIC (Handles bad IDs safely)
 app.get('/api/chat/unread/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-
-        // 🚩 Validating ID to prevent crashes
         if (!userId || userId === 'undefined' || userId === 'null') {
-            return res.status(200).json({ total: 0, perChat: {} }); // Returning 200 OK with 0 is safer for frontend
+            return res.status(200).json({ total: 0, perChat: {} }); 
         }
 
         const chats = await Chat.find({ participants: userId });
@@ -314,13 +302,11 @@ app.get('/api/chat/unread/:userId', async (req, res) => {
 
         res.json({ total: unreadMessages.length, perChat: unreadMap });
     } catch (err) {
-        console.error("❌ Unread API Error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
 // --- 11. SOCKET.IO ENGINE ---
-
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   
