@@ -64,7 +64,7 @@ const chatUpload = multer({
 });
 
 // --- 4. BASIC ROUTES ---
-app.get('/', (req, res) => res.status(200).send('🚀 Master Node Active | v2.1 (Supplier Stats Fixed)'));
+app.get('/', (req, res) => res.status(200).send('🚀 Master Node Active | v2.2 (Unread & Stats Fixed)'));
 app.use('/api/auth', require('./routes/auth'));
 
 // --- 5. PRODUCT ENGINE (Copyright & Upload) ---
@@ -193,9 +193,9 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     res.json({ message: "Updated" });
 });
 
-// --- 8. STATS & ANALYTICS (UPDATED) ---
+// --- 8. STATS & ANALYTICS ---
 
-// 🔥 NEW: ROBUST SUPPLIER STATS (Added Here) 🔥
+// ✅ FIXED: SUPPLIER STATS (Validates ID)
 app.get('/api/supplier/stats/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
@@ -285,6 +285,38 @@ app.get('/api/chat/conversations/:userId', async (req, res) => {
 app.get('/api/chat/messages/:chatId', async (req, res) => {
     const data = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
     res.json(data);
+});
+
+// ✅ FIXED: UNREAD MESSAGES LOGIC (Handles bad IDs safely)
+app.get('/api/chat/unread/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+
+        // 🚩 Validating ID to prevent crashes
+        if (!userId || userId === 'undefined' || userId === 'null') {
+            return res.status(200).json({ total: 0, perChat: {} }); // Returning 200 OK with 0 is safer for frontend
+        }
+
+        const chats = await Chat.find({ participants: userId });
+        const chatIds = chats.map(c => c._id);
+
+        const unreadMessages = await Message.find({ 
+            chatId: { $in: chatIds }, 
+            sender: { $ne: userId }, 
+            status: { $ne: 'seen' } 
+        });
+
+        const unreadMap = {};
+        unreadMessages.forEach(msg => {
+            const cId = msg.chatId.toString();
+            unreadMap[cId] = (unreadMap[cId] || 0) + 1;
+        });
+
+        res.json({ total: unreadMessages.length, perChat: unreadMap });
+    } catch (err) {
+        console.error("❌ Unread API Error:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // --- 11. SOCKET.IO ENGINE ---
