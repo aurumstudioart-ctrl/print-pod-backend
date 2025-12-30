@@ -11,7 +11,7 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-// --- 1. MODELS LOADING ---
+// --- 1. MODELS LOADING (Safe Singleton Pattern) ---
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Chat = require('./models/Chat');
@@ -25,21 +25,21 @@ const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB for heavy designs
+  maxHttpBufferSize: 5e7 // 50 MB
 });
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); 
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static('/app/uploads'));
 
 // DB Connection
 const mongoURI = process.env.MONGO_URI;
 mongoose.connect(mongoURI)
-    .then(() => console.log("✅ MongoDB Connected Successfully"))
-    .catch(err => console.error("❌ MongoDB Connection Error:", err));
+    .then(() => console.log("✅ MongoDB Connected"))
+    .catch(err => console.error("❌ MongoDB Error:", err));
 
-// Upload Setup
+// --- 3. UPLOAD SETUP ---
 const uploadDir = '/app/uploads';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -49,21 +49,19 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// --- 3. BASIC ROUTES ---
-app.get('/', (req, res) => {
-    res.status(200).send('🚀 POD Marketplace API is Healthy and Running...');
-});
+// --- 4. CORE ROUTES ---
+app.get('/', (req, res) => res.send('🚀 POD Marketplace API Operational... Status: Healthy ✅'));
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. CHAT SYSTEM APIs ---
-
+// Chat File Upload
 app.post('/api/chat/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).send("No file uploaded");
   res.json({ filePath: `http://print-api.129.80.92.53.nip.io/uploads/${req.file.filename}` });
 });
 
+// --- 5. CHAT ENGINE APIs ---
 app.get('/api/chat/conversations/:userId', async (req, res) => {
   try {
     const chats = await Chat.find({ participants: req.params.userId })
@@ -82,14 +80,11 @@ app.get('/api/chat/messages/:chatId', async (req, res) => {
 app.get('/api/chat/unread/:userId', async (req, res) => {
     try {
       const chats = await Chat.find({ participants: req.params.userId });
-      const unreadMessages = await Message.find({ 
-          chatId: { $in: chats.map(c => c._id) }, 
-          sender: { $ne: req.params.userId }, 
-          status: { $ne: 'seen' } 
-      });
+      const chatIds = chats.map(c => c._id);
+      const unread = await Message.find({ chatId: { $in: chatIds }, sender: { $ne: req.params.userId }, status: { $ne: 'seen' } });
       const unreadMap = {};
-      unreadMessages.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
-      res.json({ total: unreadMessages.length, perChat: unreadMap });
+      unread.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
+      res.json({ total: unread.length, perChat: unreadMap });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -105,8 +100,7 @@ app.get('/api/user/search', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 5. WALLET & WITHDRAWAL SYSTEM (With Hold Logic) ---
-
+// --- 6. FINANCIAL SYSTEM (Wallet & Payouts) ---
 app.get('/api/wallet/:userId', async (req, res) => {
     try {
         const user = await User.findById(req.params.userId);
@@ -133,8 +127,7 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     const user = await User.findById(userId);
     if (!user || user.walletBalance < amount) return res.status(400).json({ message: "Insufficient Balance!" });
     
-    // Hold Money Immediately
-    await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
+    await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } }); // Hold Logic
     const newRequest = new Withdrawal({ user: userId, amount, status: 'pending' });
     await newRequest.save();
     res.json({ message: "Withdrawal request sent! Funds are on hold." });
@@ -152,38 +145,34 @@ app.post('/api/admin/withdrawals/action', async (req, res) => {
     const request = await Withdrawal.findById(id);
     if (!request || request.status !== 'pending') return res.status(400).json({ message: "Invalid Request" });
 
-    if (action === 'rejected') {
-        // Refund on Rejection
-        await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
-    }
+    if (action === 'rejected') await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } }); // Refund
     request.status = action;
     await request.save();
     res.json({ message: `Request ${action} updated!` });
 });
 
-// --- 6. ORDER MANAGEMENT SYSTEM ---
+// --- 7. ORDER MANAGEMENT (Seller & Supplier) ---
 
 app.post('/api/orders/create', async (req, res) => {
   try {
     const newOrder = new Order(req.body);
     await newOrder.save();
     res.json({ message: "Order Created!", orderId: newOrder._id });
-  } catch (err) { 
-    console.error("❌ Order Error:", err.message);
-    res.status(500).json({ error: err.message }); 
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/orders/supplier/:id', async (req, res) => {
+// GET SELLER ORDERS (404 FIX)
+app.get('/api/orders/seller/:id', async (req, res) => {
     try {
-      const orders = await Order.find({ supplierId: req.params.id })
-        .populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
-      res.json(orders);
+        const orders = await Order.find({ sellerId: req.params.id })
+            .populate('productId', 'name')
+            .sort({ createdAt: -1 });
+        res.json(orders);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Ek aur route variant for safety (jo aapka frontend use kar raha hai)
-app.get('/api/order/supplier/:id', async (req, res) => {
+// GET SUPPLIER ORDERS
+app.get('/api/orders/supplier/:id', async (req, res) => {
     try {
       const orders = await Order.find({ supplierId: req.params.id })
         .populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
@@ -198,8 +187,7 @@ app.patch('/api/orders/status', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 7. DASHBOARD STATS ---
-
+// --- 8. DASHBOARD STATS ---
 app.get('/api/admin/stats', async (req, res) => {
     try {
         const sellers = await User.countDocuments({ role: 'seller' });
@@ -214,16 +202,13 @@ app.get('/api/supplier/stats/:id', async (req, res) => {
     try {
         const products = await Product.countDocuments({ supplier: req.params.id });
         const user = await User.findById(req.params.id);
-        const withdrawn = await Withdrawal.aggregate([
-            { $match: { user: new mongoose.Types.ObjectId(req.params.id), status: 'approved' } },
-            { $group: { _id: null, total: { $sum: "$amount" } } }
-        ]);
+        const withdrawn = await Withdrawal.aggregate([{ $match: { user: new mongoose.Types.ObjectId(req.params.id), status: 'approved' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
         const pendingRequests = await Withdrawal.countDocuments({ user: req.params.id, status: 'pending' });
         res.json({ products, balance: user ? user.walletBalance : 0, withdrawn: withdrawn[0]?.total || 0, pendingRequests });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 8. SOCKET.IO LOGIC ---
+// --- 9. SOCKET.IO REAL-TIME ENGINE ---
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
 
@@ -238,8 +223,10 @@ io.on('connection', (socket) => {
         chat.lastMessage = text || '📷 Photo Attachment';
         chat.lastMessageTime = Date.now();
         await chat.save();
+
         const newMessage = new Message({ chatId: chat._id, sender: senderId, text, attachment, status: 'delivered' });
         await newMessage.save();
+
         io.to(receiverId).emit('receive_message', newMessage);
         io.to(receiverId).emit('notification', { from: senderId, chatId: chat._id });
     } catch (e) { console.error(e); }
@@ -259,4 +246,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 80;
-server.listen(PORT, () => console.log(`🚀 Operational on Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Master Server active on Port ${PORT}`));
