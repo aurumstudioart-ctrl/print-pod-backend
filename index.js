@@ -20,6 +20,14 @@ const Message = require('./models/Message');
 const Order = require('./models/Order');
 const Withdrawal = require('./models/Withdrawal');
 
+// SYSTEM CONFIG MODEL (Naya model settings ke liye)
+const configSchema = new mongoose.Schema({
+    key: { type: String, default: 'main_config' },
+    quarantineEnabled: { type: Boolean, default: true },
+    quarantineDuration: { type: Number, default: 180 }, // 3 hours in minutes
+});
+const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
+
 // Inline Review Model
 const reviewSchema = new mongoose.Schema({
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
@@ -30,9 +38,16 @@ const reviewSchema = new mongoose.Schema({
 });
 const Review = mongoose.models.Review || mongoose.model('Review', reviewSchema);
 
-// --- 2. CONFIGURATION & SECURITY ---
+// --- 2. CONFIGURATION & HELPERS ---
 const PHONE_REGEX = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+
+// Helper function taake data hamesha mojud ho
+const getAppConfig = async () => {
+    let config = await SystemConfig.findOne({ key: 'main_config' });
+    if (!config) { config = new SystemConfig(); await config.save(); }
+    return config;
+};
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
@@ -65,12 +80,11 @@ const chatUpload = multer({
 
 // --- 4. CORE APIs & CHAT ROUTES ---
 
-app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Operational | Secure Connection Active'));
+app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Operational'));
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// Chat Upload
 app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
     if (!req.file) return res.status(400).send("No file uploaded");
     res.json({ filePath: `http://print-api.129.80.92.53.nip.io/uploads/${req.file.filename}` });
@@ -247,28 +261,9 @@ app.get('/api/admin/stats', async (req, res) => {
     res.json({ sellers, suppliers, pending, payouts: payouts[0]?.total || 0 });
 });
 
-app.get('/api/admin/detailed-stats', async (req, res) => {
-    try {
-        const supplierPerformance = await Order.aggregate([
-            { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" } }},
-            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" }},
-            { $unwind: "$details" }
-        ]);
-        res.json({ supplierPerformance, userStats: { sellers: await User.countDocuments({role:'seller'}), suppliers: await User.countDocuments({role:'supplier'}) } });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// --- 8. MASTER ADMIN CONTROLS ---
 
-app.get('/api/supplier/stats/:id', async (req, res) => {
-    const prodCount = await Product.countDocuments({ supplier: req.params.id });
-    const user = await User.findById(req.params.id);
-    const paidOut = await Withdrawal.aggregate([{ $match: { user: new mongoose.Types.ObjectId(req.params.id), status: 'approved' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
-    const pending = await Withdrawal.countDocuments({ user: req.params.id, status: 'pending' });
-    res.json({ products: prodCount, balance: user ? user.walletBalance : 0, withdrawn: paidOut[0]?.total || 0, pendingRequests: pending });
-});
-
-// --- 9. MASTER ADMIN CONTROLS (User Management) ---
-
-// Get All Users (Admin Only)
+// Get All Users
 app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await User.find({}).select('-password').sort({ createdAt: -1 });
@@ -279,23 +274,23 @@ app.get('/api/admin/users', async (req, res) => {
 // Ban/Unban User
 app.patch('/api/admin/users/status', async (req, res) => {
     try {
-        const { userId, status } = req.body; // status: 'active' or 'banned'
+        const { userId, status } = req.body;
         await User.findByIdAndUpdate(userId, { status });
         res.json({ message: `User status updated to ${status}` });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Update User Wallet Manually (Admin Power)
+// Wallet Adjust
 app.post('/api/admin/users/wallet-adjust', async (req, res) => {
     try {
-        const { userId, amount, action } = req.body; // action: 'add' or 'deduct'
+        const { userId, amount, action } = req.body;
         const multiplier = action === 'add' ? 1 : -1;
         await User.findByIdAndUpdate(userId, { $inc: { walletBalance: (amount * multiplier) } });
         res.json({ message: "Wallet adjusted successfully" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get ALL Orders on Platform (God View)
+// God View: All Orders
 app.get('/api/admin/orders-all', async (req, res) => {
     try {
         const orders = await Order.find({})
@@ -307,7 +302,30 @@ app.get('/api/admin/orders-all', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 8. SOCKET.IO ENGINE ---
+// --- 9. SYSTEM SETTINGS APIs ---
+
+// Get Settings
+app.get('/api/admin/config', async (req, res) => {
+    try {
+        const config = await getAppConfig();
+        res.json(config);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Update Settings
+app.post('/api/admin/config', async (req, res) => {
+    try {
+        const { quarantineEnabled, quarantineDuration } = req.body;
+        const config = await SystemConfig.findOneAndUpdate(
+            { key: 'main_config' }, 
+            { quarantineEnabled, quarantineDuration },
+            { new: true, upsert: true }
+        );
+        res.json({ message: "System configuration updated!", config });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- 10. SOCKET.IO & AUTOMATION ---
 
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
@@ -325,10 +343,14 @@ io.on('connection', (socket) => {
   });
 });
 
+// Auto-Approve Products with Dynamic Settings
 setInterval(async () => {
-    const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const config = await getAppConfig();
+    if (!config.quarantineEnabled) return;
+
+    const cutoff = new Date(Date.now() - config.quarantineDuration * 60 * 1000);
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
-}, 600000);
+}, 600000); // Har 10 mins baad check karega
 
 const PORT = 80;
 server.listen(PORT, () => console.log(`🚀 Node operational on Port ${PORT}`));
