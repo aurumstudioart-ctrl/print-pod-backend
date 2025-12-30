@@ -76,7 +76,6 @@ app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
     res.json({ filePath: `http://print-api.129.80.92.53.nip.io/uploads/${req.file.filename}` });
 });
 
-// 🚩 FIXED: Conversations List API (Yeh 404 de raha tha)
 app.get('/api/chat/conversations/:userId', async (req, res) => {
     try {
         const chats = await Chat.find({ participants: req.params.userId })
@@ -86,7 +85,6 @@ app.get('/api/chat/conversations/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Chat Messages History
 app.get('/api/chat/messages/:chatId', async (req, res) => {
     try {
         const messages = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
@@ -94,7 +92,6 @@ app.get('/api/chat/messages/:chatId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Unread Messages Count
 app.get('/api/chat/unread/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -108,7 +105,6 @@ app.get('/api/chat/unread/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Admin User Search
 app.get('/api/user/search', async (req, res) => {
     const { query } = req.query;
     if (!query) return res.json([]);
@@ -268,6 +264,47 @@ app.get('/api/supplier/stats/:id', async (req, res) => {
     const paidOut = await Withdrawal.aggregate([{ $match: { user: new mongoose.Types.ObjectId(req.params.id), status: 'approved' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
     const pending = await Withdrawal.countDocuments({ user: req.params.id, status: 'pending' });
     res.json({ products: prodCount, balance: user ? user.walletBalance : 0, withdrawn: paidOut[0]?.total || 0, pendingRequests: pending });
+});
+
+// --- 9. MASTER ADMIN CONTROLS (User Management) ---
+
+// Get All Users (Admin Only)
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find({}).select('-password').sort({ createdAt: -1 });
+        res.json(users);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Ban/Unban User
+app.patch('/api/admin/users/status', async (req, res) => {
+    try {
+        const { userId, status } = req.body; // status: 'active' or 'banned'
+        await User.findByIdAndUpdate(userId, { status });
+        res.json({ message: `User status updated to ${status}` });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Update User Wallet Manually (Admin Power)
+app.post('/api/admin/users/wallet-adjust', async (req, res) => {
+    try {
+        const { userId, amount, action } = req.body; // action: 'add' or 'deduct'
+        const multiplier = action === 'add' ? 1 : -1;
+        await User.findByIdAndUpdate(userId, { $inc: { walletBalance: (amount * multiplier) } });
+        res.json({ message: "Wallet adjusted successfully" });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get ALL Orders on Platform (God View)
+app.get('/api/admin/orders-all', async (req, res) => {
+    try {
+        const orders = await Order.find({})
+            .populate('sellerId', 'name')
+            .populate('supplierId', 'name')
+            .populate('productId', 'name')
+            .sort({ createdAt: -1 });
+        res.json(orders);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- 8. SOCKET.IO ENGINE ---
