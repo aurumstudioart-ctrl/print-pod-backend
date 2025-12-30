@@ -20,11 +20,11 @@ const Message = require('./models/Message');
 const Order = require('./models/Order');
 const Withdrawal = require('./models/Withdrawal');
 
-// SYSTEM CONFIG MODEL (Naya model settings ke liye)
+// SYSTEM CONFIG MODEL
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
-    quarantineDuration: { type: Number, default: 180 }, // 3 hours in minutes
+    quarantineDuration: { type: Number, default: 180 }, // Minutes
 });
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
 
@@ -42,7 +42,6 @@ const Review = mongoose.models.Review || mongoose.model('Review', reviewSchema);
 const PHONE_REGEX = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
-// Helper function taake data hamesha mojud ho
 const getAppConfig = async () => {
     let config = await SystemConfig.findOne({ key: 'main_config' });
     if (!config) { config = new SystemConfig(); await config.save(); }
@@ -51,7 +50,7 @@ const getAppConfig = async () => {
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB
+  maxHttpBufferSize: 5e7 
 });
 
 app.use(cors());
@@ -116,18 +115,6 @@ app.get('/api/chat/unread/:userId', async (req, res) => {
         const unreadMap = {};
         unreadMessages.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
         res.json({ total: unreadMessages.length, perChat: unreadMap });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/user/search', async (req, res) => {
-    const { query } = req.query;
-    if (!query) return res.json([]);
-    try {
-        const users = await User.find({
-            $or: [{ name: { $regex: query, $options: 'i' } }, { email: { $regex: query, $options: 'i' } }],
-            role: { $ne: 'admin' }
-        }).select('name email role _id');
-        res.json(users);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -212,14 +199,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     res.json({ message: "Request Sent" });
 });
 
-app.post('/api/admin/withdrawals/action', async (req, res) => {
-    const request = await Withdrawal.findById(req.body.id);
-    if (req.body.action === 'rejected') await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
-    request.status = req.body.action;
-    await request.save();
-    res.json({ message: "Updated" });
-});
-
 app.get('/api/admin/withdrawals', async (req, res) => {
     try {
         const data = await Withdrawal.find().populate('user', 'name email role walletBalance').sort({ createdAt: -1 });
@@ -227,7 +206,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 7. ORDERS & STATS ---
+// --- 7. ORDERS & ANALYTICS ---
 
 app.post('/api/orders/create', async (req, res) => {
     try {
@@ -238,19 +217,50 @@ app.post('/api/orders/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/orders/supplier/:id', async (req, res) => {
-    const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
-    res.json(data);
-});
+// 🛡️ ADMIN DETAILED STATS (Revenue Timeline + Supplier Performance)
+app.get('/api/admin/detailed-stats', async (req, res) => {
+    try {
+        // 1. Supplier Performance
+        const supplierPerformance = await Order.aggregate([
+            {
+                $group: {
+                    _id: "$supplierId",
+                    totalOrders: { $sum: 1 },
+                    revenue: { $sum: "$totalPrice" },
+                    pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+                    shipped: { $sum: { $cond: [{ $eq: ["$status", "shipped"] }, 1, 0] } }
+                }
+            },
+            {
+                $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" }
+            },
+            { $unwind: "$details" }
+        ]);
 
-app.get('/api/orders/seller/:id', async (req, res) => {
-    const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name').sort({ createdAt: -1 });
-    res.json(data);
-});
+        // 2. Revenue Timeline (Last 30 Days)
+        const revenueTimeline = await Order.aggregate([
+            {
+                $group: {
+                    _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+                    dailyRevenue: { $sum: "$totalPrice" },
+                    orderCount: { $sum: 1 }
+                }
+            },
+            { $sort: { "_id": 1 } },
+            { $limit: 30 }
+        ]);
 
-app.patch('/api/orders/status', async (req, res) => {
-    await Order.findByIdAndUpdate(req.body.orderId, { status: req.body.status });
-    res.json({ message: "Synced" });
+        // 3. Simple User Counts
+        const userStats = {
+            sellers: await User.countDocuments({ role: 'seller' }),
+            suppliers: await User.countDocuments({ role: 'supplier' })
+        };
+
+        res.json({ supplierPerformance, revenueTimeline, userStats });
+    } catch (err) {
+        console.error("❌ Detailed Stats API Error:", err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/admin/stats', async (req, res) => {
@@ -263,7 +273,6 @@ app.get('/api/admin/stats', async (req, res) => {
 
 // --- 8. MASTER ADMIN CONTROLS ---
 
-// Get All Users
 app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await User.find({}).select('-password').sort({ createdAt: -1 });
@@ -271,7 +280,6 @@ app.get('/api/admin/users', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Ban/Unban User
 app.patch('/api/admin/users/status', async (req, res) => {
     try {
         const { userId, status } = req.body;
@@ -280,7 +288,6 @@ app.patch('/api/admin/users/status', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Wallet Adjust
 app.post('/api/admin/users/wallet-adjust', async (req, res) => {
     try {
         const { userId, amount, action } = req.body;
@@ -290,7 +297,6 @@ app.post('/api/admin/users/wallet-adjust', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// God View: All Orders
 app.get('/api/admin/orders-all', async (req, res) => {
     try {
         const orders = await Order.find({})
@@ -302,9 +308,8 @@ app.get('/api/admin/orders-all', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 9. SYSTEM SETTINGS APIs ---
+// --- 9. SYSTEM SETTINGS ---
 
-// Get Settings
 app.get('/api/admin/config', async (req, res) => {
     try {
         const config = await getAppConfig();
@@ -312,7 +317,6 @@ app.get('/api/admin/config', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Update Settings
 app.post('/api/admin/config', async (req, res) => {
     try {
         const { quarantineEnabled, quarantineDuration } = req.body;
@@ -343,14 +347,12 @@ io.on('connection', (socket) => {
   });
 });
 
-// Auto-Approve Products with Dynamic Settings
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
-
     const cutoff = new Date(Date.now() - config.quarantineDuration * 60 * 1000);
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
-}, 600000); // Har 10 mins baad check karega
+}, 600000);
 
 const PORT = 80;
 server.listen(PORT, () => console.log(`🚀 Node operational on Port ${PORT}`));
