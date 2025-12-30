@@ -24,19 +24,9 @@ const Withdrawal = require('./models/Withdrawal');
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
-    quarantineDuration: { type: Number, default: 180 }, // Minutes
+    quarantineDuration: { type: Number, default: 180 }, 
 });
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
-
-// Inline Review Model
-const reviewSchema = new mongoose.Schema({
-    productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    rating: { type: Number, min: 1, max: 5 },
-    comment: String,
-    createdAt: { type: Date, default: Date.now }
-});
-const Review = mongoose.models.Review || mongoose.model('Review', reviewSchema);
 
 // --- 2. CONFIGURATION & HELPERS ---
 const PHONE_REGEX = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
@@ -206,8 +196,9 @@ app.get('/api/admin/withdrawals', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 7. ORDERS & ANALYTICS ---
+// --- 7. ORDER ENGINE (FIXED & ALIASED) ---
 
+// Create Order
 app.post('/api/orders/create', async (req, res) => {
     try {
         const newOrder = new Order(req.body);
@@ -217,61 +208,74 @@ app.post('/api/orders/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 🛡️ ADMIN DETAILED STATS (Revenue Timeline + Supplier Performance)
-app.get('/api/admin/detailed-stats', async (req, res) => {
+// GET SUPPLIER ORDERS (Standardized Helper)
+const getSupOrders = async (req, res) => {
     try {
-        // 1. Supplier Performance
-        const supplierPerformance = await Order.aggregate([
-            {
-                $group: {
-                    _id: "$supplierId",
-                    totalOrders: { $sum: 1 },
-                    revenue: { $sum: "$totalPrice" },
-                    pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
-                    shipped: { $sum: { $cond: [{ $eq: ["$status", "shipped"] }, 1, 0] } }
-                }
-            },
-            {
-                $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" }
-            },
-            { $unwind: "$details" }
-        ]);
+        const supplierId = req.params.id;
+        if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
+        const orders = await Order.find({ supplierId: supplierId })
+            .populate('sellerId', 'name email')
+            .populate('productId', 'name')
+            .sort({ createdAt: -1 });
+        res.json(orders);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+};
 
-        // 2. Revenue Timeline (Last 30 Days)
-        const revenueTimeline = await Order.aggregate([
-            {
-                $group: {
-                    _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-                    dailyRevenue: { $sum: "$totalPrice" },
-                    orderCount: { $sum: 1 }
-                }
-            },
-            { $sort: { "_id": 1 } },
-            { $limit: 30 }
-        ]);
+// Routes for Supplier Orders
+app.get('/api/orders/supplier/:id', getSupOrders);
+app.get('/api/order/supplier/:id', getSupOrders); 
 
-        // 3. Simple User Counts
-        const userStats = {
-            sellers: await User.countDocuments({ role: 'seller' }),
-            suppliers: await User.countDocuments({ role: 'supplier' })
-        };
-
-        res.json({ supplierPerformance, revenueTimeline, userStats });
-    } catch (err) {
-        console.error("❌ Detailed Stats API Error:", err.message);
-        res.status(500).json({ error: err.message });
-    }
+// Seller Orders
+app.get('/api/orders/seller/:id', async (req, res) => {
+    const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name').sort({ createdAt: -1 });
+    res.json(data);
 });
 
-app.get('/api/admin/stats', async (req, res) => {
-    const sellers = await User.countDocuments({ role: 'seller' });
-    const suppliers = await User.countDocuments({ role: 'supplier' });
-    const pending = await Withdrawal.countDocuments({ status: 'pending' });
-    const payouts = await Withdrawal.aggregate([{ $match: { status: 'approved' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
-    res.json({ sellers, suppliers, pending, payouts: payouts[0]?.total || 0 });
+// Order Status Update
+app.patch('/api/orders/status', async (req, res) => {
+    await Order.findByIdAndUpdate(req.body.orderId, { status: req.body.status });
+    res.json({ message: "Synced" });
+});
+
+// SUPPLIER STATS (Standardized)
+app.get('/api/supplier/stats/:id', async (req, res) => {
+    try {
+        const supplierId = req.params.id;
+        if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
+
+        const prodCount = await Product.countDocuments({ supplier: supplierId });
+        const user = await User.findById(supplierId);
+        const withdrawals = await Withdrawal.aggregate([
+            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        const pending = await Withdrawal.countDocuments({ user: supplierId, status: 'pending' });
+
+        res.json({ 
+            products: prodCount || 0, 
+            balance: user?.walletBalance || 0, 
+            withdrawn: withdrawals[0]?.total || 0, 
+            pendingRequests: pending || 0 
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- 8. MASTER ADMIN CONTROLS ---
+
+app.get('/api/admin/detailed-stats', async (req, res) => {
+    try {
+        const supplierPerformance = await Order.aggregate([
+            { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" }, pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } }, shipped: { $sum: { $cond: [{ $eq: ["$status", "shipped"] }, 1, 0] } } } },
+            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" } },
+            { $unwind: "$details" }
+        ]);
+        const revenueTimeline = await Order.aggregate([
+            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, dailyRevenue: { $sum: "$totalPrice" }, orderCount: { $sum: 1 } } },
+            { $sort: { "_id": 1 } }, { $limit: 30 }
+        ]);
+        res.json({ supplierPerformance, revenueTimeline, userStats: { sellers: await User.countDocuments({role:'seller'}), suppliers: await User.countDocuments({role:'supplier'}) } });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 app.get('/api/admin/users', async (req, res) => {
     try {
