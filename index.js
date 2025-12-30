@@ -61,7 +61,6 @@ if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
 const upload = multer({ dest: tempDir }); 
 
-// Advanced Upload Config (Images + Video)
 const productUpload = upload.fields([
     { name: 'images', maxCount: 12 },
     { name: 'video', maxCount: 1 }
@@ -115,48 +114,51 @@ app.get('/api/chat/unread/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 5. PRODUCT ENGINE (WITH SECURITY SCAN) ---
+// --- 5. PRODUCT ENGINE (ADVANCED SECURITY SCAN) ---
 
 app.post('/api/product/add', productUpload, async (req, res) => {
     try {
         const { name, description, basePrice, supplierId, category, tags, variations, source, isPhysical } = req.body;
 
-        // 1. Asset Validation
+        // 1. Assets Validation
         if (!req.files || !req.files['images']) {
-            return res.status(400).json({ error: "Missing Assets: At least one product image is required for scanning." });
+            return res.status(400).json({ 
+                error: "Assets Missing", 
+                guide: "A product requires at least one primary image for the neural security scan." 
+            });
         }
 
         const primaryImage = req.files['images'][0];
 
-        // 🛡️ SECURITY SCAN: Copyright Fingerprinting (Sharp)
+        // 🛡️ COPYRIGHT SCAN (Neural Hash)
         const imageBuffer = await sharp(primaryImage.path).resize(10, 10).grayscale().toBuffer();
         const currentHash = imageBuffer.toString('base64');
 
         const isDuplicateImage = await Product.findOne({ imageHash: currentHash });
         if (isDuplicateImage) {
-            // Cleanup temp files
+            // Delete temp files
             Object.values(req.files).flat().forEach(f => fs.existsSync(f.path) && fs.unlinkSync(f.path));
             return res.status(403).json({ 
-                error: "SECURITY VIOLATION: DESIGN ALREADY EXISTS",
-                guide: "Our AI detected that this design is already registered in the master database. Please upload original artwork." 
+                error: "Copyright Violation Detected",
+                guide: "Our system found a 100% match for this design in the global database. To protect original creators, you cannot upload duplicate artwork." 
             });
         }
 
-        // 🛡️ SECURITY SCAN: Title Spam (Case-insensitive)
+        // 🛡️ TITLE POLICY (SEO & SPAM Guard)
         const isDuplicateTitle = await Product.findOne({ name: { $regex: new RegExp(`^${name}$`, 'i') } });
         if (isDuplicateTitle) {
             Object.values(req.files).flat().forEach(f => fs.existsSync(f.path) && fs.unlinkSync(f.path));
             return res.status(403).json({ 
-                error: "POLICY VIOLATION: DUPLICATE TITLE",
-                guide: "A product with this exact name already exists. Please use a unique title for better SEO ranking." 
+                error: "Policy Violation: Duplicate Title",
+                guide: "Another product is already using this exact title. Please use a unique, descriptive name for better SEO ranking." 
             });
         }
 
-        // 2. Final Processing
+        // 2. Storage Processing
         const finalFileName = `prod-${Date.now()}-${primaryImage.originalname.replace(/\s+/g, '-')}`;
         fs.renameSync(primaryImage.path, path.join(uploadDir, finalFileName));
 
-        // Delete remaining temp files if any (video/extra images not saved in this logic)
+        // Delete other temp files (like video if not handled yet)
         Object.values(req.files).flat().forEach(f => fs.existsSync(f.path) && fs.unlinkSync(f.path));
 
         const newProduct = new Product({
@@ -172,10 +174,14 @@ app.post('/api/product/add', productUpload, async (req, res) => {
         });
 
         await newProduct.save();
-        res.json({ message: "Neural Scan Passed! Product is in 3-hour quarantine." });
+        res.json({ message: "Neural Scan Passed!" });
 
     } catch (err) {
-        res.status(500).json({ error: "Internal System Error", details: err.message });
+        res.status(500).json({ 
+            error: "Master Node Error", 
+            guide: "System is temporarily busy. Please try again in 5 minutes.",
+            details: err.message 
+        });
     }
 });
 
@@ -231,7 +237,7 @@ app.get('/api/admin/withdrawals', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 7. ORDER ENGINE (ALIASED) ---
+// --- 7. ORDER ENGINE (FIXED ROUTES) ---
 
 app.post('/api/orders/create', async (req, res) => {
     try {
