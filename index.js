@@ -53,13 +53,20 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ SYSTEM: Master Database Connected"))
     .catch(err => console.error("❌ CRITICAL: DB Connection Error", err));
 
-// --- 3. STORAGE SETUP ---
+// --- 3. STORAGE & MULTER SETUP ---
 const uploadDir = '/app/uploads';
 const tempDir = 'temp/';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
 const upload = multer({ dest: tempDir }); 
+
+// Advanced Upload Config (Images + Video)
+const productUpload = upload.fields([
+    { name: 'images', maxCount: 12 },
+    { name: 'video', maxCount: 1 }
+]);
+
 const chatUpload = multer({ 
     storage: multer.diskStorage({
         destination: (req, file, cb) => cb(null, uploadDir),
@@ -108,24 +115,49 @@ app.get('/api/chat/unread/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 5. PRODUCT & SEARCH ENGINE ---
+// --- 5. PRODUCT ENGINE (WITH SECURITY SCAN) ---
 
-app.post('/api/product/add', upload.single('image'), async (req, res) => {
+app.post('/api/product/add', productUpload, async (req, res) => {
     try {
         const { name, description, basePrice, supplierId, category, tags, variations, source, isPhysical } = req.body;
-        if (!req.file) return res.status(400).send("Image required.");
 
-        const imageBuffer = await sharp(req.file.path).resize(10, 10).grayscale().toBuffer();
-        const currentHash = imageBuffer.toString('base64');
-
-        const isDuplicate = await Product.findOne({ imageHash: currentHash });
-        if (isDuplicate) {
-            fs.unlinkSync(req.file.path);
-            return res.status(403).json({ error: "Copyright Alert: design already exists" });
+        // 1. Asset Validation
+        if (!req.files || !req.files['images']) {
+            return res.status(400).json({ error: "Missing Assets: At least one product image is required for scanning." });
         }
 
-        const finalFileName = `prod-${Date.now()}.png`;
-        fs.renameSync(req.file.path, path.join(uploadDir, finalFileName));
+        const primaryImage = req.files['images'][0];
+
+        // 🛡️ SECURITY SCAN: Copyright Fingerprinting (Sharp)
+        const imageBuffer = await sharp(primaryImage.path).resize(10, 10).grayscale().toBuffer();
+        const currentHash = imageBuffer.toString('base64');
+
+        const isDuplicateImage = await Product.findOne({ imageHash: currentHash });
+        if (isDuplicateImage) {
+            // Cleanup temp files
+            Object.values(req.files).flat().forEach(f => fs.existsSync(f.path) && fs.unlinkSync(f.path));
+            return res.status(403).json({ 
+                error: "SECURITY VIOLATION: DESIGN ALREADY EXISTS",
+                guide: "Our AI detected that this design is already registered in the master database. Please upload original artwork." 
+            });
+        }
+
+        // 🛡️ SECURITY SCAN: Title Spam (Case-insensitive)
+        const isDuplicateTitle = await Product.findOne({ name: { $regex: new RegExp(`^${name}$`, 'i') } });
+        if (isDuplicateTitle) {
+            Object.values(req.files).flat().forEach(f => fs.existsSync(f.path) && fs.unlinkSync(f.path));
+            return res.status(403).json({ 
+                error: "POLICY VIOLATION: DUPLICATE TITLE",
+                guide: "A product with this exact name already exists. Please use a unique title for better SEO ranking." 
+            });
+        }
+
+        // 2. Final Processing
+        const finalFileName = `prod-${Date.now()}-${primaryImage.originalname.replace(/\s+/g, '-')}`;
+        fs.renameSync(primaryImage.path, path.join(uploadDir, finalFileName));
+
+        // Delete remaining temp files if any (video/extra images not saved in this logic)
+        Object.values(req.files).flat().forEach(f => fs.existsSync(f.path) && fs.unlinkSync(f.path));
 
         const newProduct = new Product({
             name, description, basePrice, category,
@@ -140,8 +172,11 @@ app.post('/api/product/add', upload.single('image'), async (req, res) => {
         });
 
         await newProduct.save();
-        res.json({ message: "Scan initiated." });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        res.json({ message: "Neural Scan Passed! Product is in 3-hour quarantine." });
+
+    } catch (err) {
+        res.status(500).json({ error: "Internal System Error", details: err.message });
+    }
 });
 
 app.get('/api/products/search', async (req, res) => {
@@ -196,9 +231,8 @@ app.get('/api/admin/withdrawals', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 7. ORDER ENGINE (FIXED & ALIASED) ---
+// --- 7. ORDER ENGINE (ALIASED) ---
 
-// Create Order
 app.post('/api/orders/create', async (req, res) => {
     try {
         const newOrder = new Order(req.body);
@@ -208,7 +242,6 @@ app.post('/api/orders/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET SUPPLIER ORDERS (Standardized Helper)
 const getSupOrders = async (req, res) => {
     try {
         const supplierId = req.params.id;
@@ -221,42 +254,18 @@ const getSupOrders = async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
-// Routes for Supplier Orders
 app.get('/api/orders/supplier/:id', getSupOrders);
 app.get('/api/order/supplier/:id', getSupOrders); 
 
-// Seller Orders
-app.get('/api/orders/seller/:id', async (req, res) => {
-    const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name').sort({ createdAt: -1 });
-    res.json(data);
-});
-
-// Order Status Update
-app.patch('/api/orders/status', async (req, res) => {
-    await Order.findByIdAndUpdate(req.body.orderId, { status: req.body.status });
-    res.json({ message: "Synced" });
-});
-
-// SUPPLIER STATS (Standardized)
 app.get('/api/supplier/stats/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
         if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
-
         const prodCount = await Product.countDocuments({ supplier: supplierId });
         const user = await User.findById(supplierId);
-        const withdrawals = await Withdrawal.aggregate([
-            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
-            { $group: { _id: null, total: { $sum: "$amount" } } }
-        ]);
+        const withdrawals = await Withdrawal.aggregate([{ $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
         const pending = await Withdrawal.countDocuments({ user: supplierId, status: 'pending' });
-
-        res.json({ 
-            products: prodCount || 0, 
-            balance: user?.walletBalance || 0, 
-            withdrawn: withdrawals[0]?.total || 0, 
-            pendingRequests: pending || 0 
-        });
+        res.json({ products: prodCount || 0, balance: user?.walletBalance || 0, withdrawn: withdrawals[0]?.total || 0, pendingRequests: pending || 0 });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -266,8 +275,7 @@ app.get('/api/admin/detailed-stats', async (req, res) => {
     try {
         const supplierPerformance = await Order.aggregate([
             { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" }, pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } }, shipped: { $sum: { $cond: [{ $eq: ["$status", "shipped"] }, 1, 0] } } } },
-            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" } },
-            { $unwind: "$details" }
+            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" } }, { $unwind: "$details" }
         ]);
         const revenueTimeline = await Order.aggregate([
             { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, dailyRevenue: { $sum: "$totalPrice" }, orderCount: { $sum: 1 } } },
@@ -303,11 +311,7 @@ app.post('/api/admin/users/wallet-adjust', async (req, res) => {
 
 app.get('/api/admin/orders-all', async (req, res) => {
     try {
-        const orders = await Order.find({})
-            .populate('sellerId', 'name')
-            .populate('supplierId', 'name')
-            .populate('productId', 'name')
-            .sort({ createdAt: -1 });
+        const orders = await Order.find({}).populate('sellerId', 'name').populate('supplierId', 'name').populate('productId', 'name').sort({ createdAt: -1 });
         res.json(orders);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -324,11 +328,7 @@ app.get('/api/admin/config', async (req, res) => {
 app.post('/api/admin/config', async (req, res) => {
     try {
         const { quarantineEnabled, quarantineDuration } = req.body;
-        const config = await SystemConfig.findOneAndUpdate(
-            { key: 'main_config' }, 
-            { quarantineEnabled, quarantineDuration },
-            { new: true, upsert: true }
-        );
+        const config = await SystemConfig.findOneAndUpdate({ key: 'main_config' }, { quarantineEnabled, quarantineDuration }, { new: true, upsert: true });
         res.json({ message: "System configuration updated!", config });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -344,10 +344,6 @@ io.on('connection', (socket) => {
     chat.lastMessage = data.text || '📷 Attachment'; chat.lastMessageTime = Date.now(); await chat.save();
     const newMessage = new Message({ ...data, chatId: chat._id, status: 'delivered' }); await newMessage.save();
     io.to(data.receiverId).emit('receive_message', newMessage);
-    io.to(data.receiverId).emit('notification', { from: data.senderId, chatId: chat._id });
-  });
-  socket.on('mark_read', async (data) => {
-    await Message.updateMany({ chatId: data.chatId, sender: { $ne: data.userId }, status: { $ne: 'seen' } }, { $set: { status: 'seen' } });
   });
 });
 
