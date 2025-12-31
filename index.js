@@ -12,7 +12,7 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-// --- 1. MODELS LOADING (Top-level) ---
+// --- 1. MODELS LOADING ---
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Chat = require('./models/Chat');
@@ -24,7 +24,7 @@ const Withdrawal = require('./models/Withdrawal');
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
-    quarantineDuration: { type: Number, default: 180 }, // Minutes
+    quarantineDuration: { type: Number, default: 180 }, 
 });
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
 
@@ -44,7 +44,7 @@ const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB for high-res designs
+  maxHttpBufferSize: 5e7 
 });
 
 app.use(cors());
@@ -59,9 +59,7 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Storage Setup
 const uploadDir = '/app/uploads';
-const tempDir = 'temp/';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir), 
@@ -75,14 +73,13 @@ const getAppConfig = async () => {
     return config;
 };
 
-// --- 3. CORE APIs & LANDING ---
+// --- 3. CORE APIs ---
 app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Active | v3.0 Secured ✅'));
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. ADVANCED PRODUCT ENGINE (Multi-Upload + Security) ---
-
+// --- 4. ADVANCED PRODUCT ENGINE ---
 const productAssets = upload.fields([
     { name: 'images', maxCount: 12 },
     { name: 'video', maxCount: 1 }
@@ -123,8 +120,27 @@ app.post('/api/product/add', productAssets, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 5. SMART SEARCH ENGINE (Etsy Logic) ---
+// --- 5. SALE & DISCOUNT ENGINE ---
+app.patch('/api/product/set-sale', async (req, res) => {
+    const { productId, discountPercentage, onSale } = req.body;
+    try {
+        const product = await Product.findById(productId);
+        if (!product) return res.status(404).send("Product not found");
 
+        const salePrice = onSale 
+            ? (product.basePrice * (1 - discountPercentage / 100)).toFixed(2) 
+            : product.basePrice;
+        
+        await Product.findByIdAndUpdate(productId, { 
+            onSale, 
+            discountPercentage, 
+            salePrice 
+        });
+        res.json({ message: "Sale status updated!", salePrice });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 6. SMART SEARCH ENGINE ---
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
@@ -143,55 +159,22 @@ app.get('/api/products/search', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-app.get('/api/products/suggestions', async (req, res) => {
-    const { q } = req.query;
-    if (!q) return res.json([]);
-    const data = await Product.find({ $or: [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }] })
-        .limit(6).select('name category tags');
-    res.json(data);
-});
-
-// --- 6. WALLET & WITHDRAWAL (Hold Logic) ---
-
+// --- 7. WALLET & WITHDRAWAL ---
 app.get('/api/wallet/:userId', async (req, res) => {
     const user = await User.findById(req.params.userId);
     res.json({ balance: user ? user.walletBalance : 0 });
 });
 
-app.post('/api/wallet/pay', async (req, res) => {
-    const user = await User.findById(req.body.userId);
-    if (!user || user.walletBalance < req.body.amount) return res.status(400).json({ message: "Low funds" });
-    await User.findByIdAndUpdate(req.body.userId, { $inc: { walletBalance: -req.body.amount } });
-    res.json({ message: "Verified" });
-});
-
 app.post('/api/wallet/withdraw', async (req, res) => {
     const user = await User.findById(req.body.userId);
     if (!user || user.walletBalance < req.body.amount) return res.status(400).json({ message: "Low Balance" });
-    
-    await User.findByIdAndUpdate(req.body.userId, { $inc: { walletBalance: -req.body.amount } }); // HOLD
+    await User.findByIdAndUpdate(req.body.userId, { $inc: { walletBalance: -req.body.amount } }); 
     const newReq = new Withdrawal({ user: req.body.userId, amount: req.body.amount, status: 'pending' });
     await newReq.save();
     res.json({ message: "Request Sent" });
 });
 
-app.post('/api/admin/withdrawals/action', async (req, res) => {
-    const request = await Withdrawal.findById(req.body.id);
-    if (req.body.action === 'rejected') {
-        await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } }); // REFUND
-    }
-    request.status = req.body.action;
-    await request.save();
-    res.json({ message: "Status Updated" });
-});
-
-app.get('/api/admin/withdrawals', async (req, res) => {
-    const data = await Withdrawal.find().populate('user', 'name email role walletBalance').sort({ createdAt: -1 });
-    res.json(data);
-});
-
-// --- 7. ORDER SYSTEM ---
-
+// --- 8. ORDER SYSTEM ---
 app.post('/api/orders/create', async (req, res) => {
     try {
         const newOrder = new Order(req.body);
@@ -201,77 +184,17 @@ app.post('/api/orders/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/orders/supplier/:id', async (req, res) => {
-    const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
-    res.json(data);
-});
-
-app.get('/api/orders/seller/:id', async (req, res) => {
-    const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name').sort({ createdAt: -1 });
-    res.json(data);
-});
-
-app.patch('/api/orders/status', async (req, res) => {
-    await Order.findByIdAndUpdate(req.body.orderId, { status: req.body.status });
-    res.json({ message: "Status Updated" });
-});
-
-// --- 8. STATS & ANALYTICS ---
-
-app.get('/api/admin/detailed-stats', async (req, res) => {
-    try {
-        const supplierPerformance = await Order.aggregate([
-            { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" } }},
-            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" }},
-            { $unwind: "$details" }
-        ]);
-        const userStats = {
-            sellers: await User.countDocuments({ role: 'seller' }),
-            suppliers: await User.countDocuments({ role: 'supplier' }),
-            pendingPayouts: await Withdrawal.countDocuments({ status: 'pending' })
-        };
-        res.json({ supplierPerformance, userStats, revenueTimeline: [] });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/supplier/stats/:id', async (req, res) => {
-    try {
-        const supplierId = req.params.id;
-        if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
-        const prodCount = await Product.countDocuments({ supplier: supplierId });
-        const user = await User.findById(supplierId);
-        res.json({ products: prodCount, balance: user ? user.walletBalance : 0, withdrawn: 0, pendingRequests: 0 });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 9. CHAT SYSTEM & UNREAD ---
-
+// --- 9. CHAT SYSTEM ---
 app.get('/api/chat/unread/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-        if (!userId || userId === 'undefined') return res.json({ total: 0, perChat: {} });
         const chats = await Chat.find({ participants: userId });
-        const chatIds = chats.map(c => c._id);
-        const unread = await Message.find({ chatId: { $in: chatIds }, sender: { $ne: userId }, status: { $ne: 'seen' } });
-        const unreadMap = {};
-        unread.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
-        res.json({ total: unread.length, perChat: unreadMap });
+        const unread = await Message.find({ chatId: { $in: chats.map(c => c._id) }, sender: { $ne: userId }, status: { $ne: 'seen' } });
+        res.json({ total: unread.length });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/chat/conversations/:userId', async (req, res) => {
-    if (!req.params.userId || req.params.userId === 'undefined') return res.json([]);
-    const data = await Chat.find({ participants: req.params.userId }).populate('participants', 'name email role').sort({ lastMessageTime: -1 });
-    res.json(data);
-});
-
-app.get('/api/chat/messages/:chatId', async (req, res) => {
-    const data = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
-    res.json(data);
-});
-
 // --- 10. SOCKET.IO ENGINE ---
-
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   socket.on('send_message', async (data) => {
@@ -280,45 +203,51 @@ io.on('connection', (socket) => {
     }
     let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
     if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); await chat.save(); }
-    chat.lastMessage = data.text || '📷 Attachment'; chat.lastMessageTime = Date.now(); await chat.save();
     const newMessage = new Message({ ...data, chatId: chat._id, status: 'delivered' }); await newMessage.save();
     io.to(data.receiverId).emit('receive_message', newMessage);
-    io.to(data.receiverId).emit('notification', { from: data.senderId, chatId: chat._id });
-  });
-  socket.on('mark_read', async (data) => {
-    await Message.updateMany({ chatId: data.chatId, sender: { $ne: data.userId }, status: { $ne: 'seen' } }, { $set: { status: 'seen' } });
   });
 });
 
-// --- 11. SUPPLIER STOREFRONT API (Updated with Reviews & Sales) ---
+// --- 11. SUPPLIER STOREFRONT & PROFILE ---
+
+// Update Shop Profile (Bio, Images, Announcement)
+app.put('/api/shop/update-profile', upload.fields([
+    { name: 'profileImage', maxCount: 1 },
+    { name: 'bannerImage', maxCount: 1 }
+]), async (req, res) => {
+    try {
+        const { userId, bio, announcement, storeName } = req.body;
+        const updateData = { bio, announcement, storeName };
+        
+        if (req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
+        if (req.files['bannerImage']) updateData.bannerImage = req.files['bannerImage'][0].filename;
+
+        const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true });
+        res.json({ message: "Shop Profile Updated! 🛡️", user: updatedUser });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// Fetch Shop Data
 app.get('/api/shop/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
         if (!mongoose.Types.ObjectId.isValid(supplierId)) return res.status(400).send("Invalid ID");
 
-        // 1. Get Supplier Data
-        const supplier = await User.findById(supplierId).select('name email storeName createdAt');
-        
-        // 2. Get Products (Approved Only)
+        // Fetch user with new profile fields
+        const supplier = await User.findById(supplierId).select('name email storeName createdAt bio announcement profileImage bannerImage');
         const products = await Product.find({ supplier: supplierId, status: 'approved' }).sort({ createdAt: -1 });
-
-        // 3. Get Reviews for all these products
-        const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } })
-            .populate('userId', 'name')
-            .sort({ createdAt: -1 });
+        const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } }).populate('userId', 'name').sort({ createdAt: -1 });
 
         res.json({
             supplier,
             products,
             reviews,
-            totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0),
-            totalProducts: products.length
+            totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0)
         });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 12. AUTOMATION ---
-
+// --- 12. AUTOMATION & ADMIN ---
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
@@ -326,7 +255,6 @@ setInterval(async () => {
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
 }, 600000);
 
-// Admin Config
 app.get('/api/admin/config', async (req, res) => res.json(await getAppConfig()));
 app.post('/api/admin/config', async (req, res) => {
     await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true });
