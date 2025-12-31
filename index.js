@@ -210,7 +210,6 @@ io.on('connection', (socket) => {
 
 // --- 11. SUPPLIER STOREFRONT & PROFILE UPDATE ---
 
-// Multer setup specifically for profile/banner images
 const profileUpload = upload.fields([
     { name: 'profileImage', maxCount: 1 },
     { name: 'bannerImage', maxCount: 1 }
@@ -220,34 +219,39 @@ app.put('/api/shop/update-profile', profileUpload, async (req, res) => {
     try {
         const { userId, storeName, bio, announcement } = req.body;
         const updateData = {};
-        
         if (storeName) updateData.storeName = storeName;
         if (bio) updateData.bio = bio;
         if (announcement) updateData.announcement = announcement;
-        
-        // Handling file uploads for profile and banner
-        if (req.files && req.files['profileImage']) {
-            updateData.profileImage = req.files['profileImage'][0].filename;
-        }
-        if (req.files && req.files['bannerImage']) {
-            updateData.bannerImage = req.files['bannerImage'][0].filename;
-        }
+        if (req.files && req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
+        if (req.files && req.files['bannerImage']) updateData.bannerImage = req.files['bannerImage'][0].filename;
 
         const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true });
         res.json({ message: "Profile Updated! 🚀", user: updatedUser });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// UPDATED SHOP FETCH ROUTE 🚩
 app.get('/api/shop/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
         if (!mongoose.Types.ObjectId.isValid(supplierId)) return res.status(400).send("Invalid ID");
-        const supplier = await User.findById(supplierId).select('name email storeName createdAt bio announcement profileImage bannerImage');
+
+        // Ensure all profile fields are selected
+        const supplier = await User.findById(supplierId)
+             .select('name email storeName createdAt profileImage bannerImage bio announcement'); 
+        
         const products = await Product.find({ supplier: supplierId, status: 'approved' }).sort({ createdAt: -1 });
-        const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } }).populate('userId', 'name').sort({ createdAt: -1 });
-        res.json({ supplier, products, reviews, totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) });
+        
+        const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } })
+            .populate('userId', 'name')
+            .sort({ createdAt: -1 });
+
+        res.json({ 
+            supplier, 
+            products, 
+            reviews, 
+            totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) 
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
