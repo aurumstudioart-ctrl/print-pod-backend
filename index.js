@@ -14,12 +14,12 @@ const server = http.createServer(app);
 
 // --- 1. DATABASE MODELS ---
 
-// PRODUCT MODEL (Updated for Multiple Images)
+// PRODUCT MODEL (Multi-Image Ready)
 const productSchema = new mongoose.Schema({
     name: { type: String, required: true },
     description: String,
     basePrice: Number,
-    imagePaths: [String], // Array for multiple images
+    imagePaths: [String], // Array for up to 12 images
     videoPath: String,    // Single video path
     supplier: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     category: String,
@@ -39,17 +39,17 @@ const Product = mongoose.models.Product || mongoose.model('Product', productSche
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
-    quarantineDuration: { type: Number, default: 180 }, // In minutes
+    quarantineDuration: { type: Number, default: 180 }, // Minutes
 });
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
 
-// Models for other features
+// Other Models (External files assumed)
 const User = require('./models/User');
 const Chat = require('./models/Chat');
 const Message = require('./models/Message');
 const Order = require('./models/Order');
 
-// --- 2. CONFIGURATION & MULTER SETUP ---
+// --- 2. MIDDLEWARE & STORAGE CONFIG ---
 
 const uploadDir = '/app/uploads';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -64,7 +64,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+    limits: { fileSize: 50 * 1024 * 1024 } // 50MB
 });
 
 const productAssets = upload.fields([
@@ -78,11 +78,16 @@ const getAppConfig = async () => {
     return config;
 };
 
-// Middleware
+// Standard Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); 
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static(uploadDir));
+
+// --- ROOT ROUTE (Fixes "Cannot GET /" error) ---
+app.get('/', (req, res) => {
+    res.status(200).send('🚀 POD Master Node Operational | Security: High');
+});
 
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] }
@@ -93,7 +98,7 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ SYSTEM: Master Database Connected"))
     .catch(err => console.error("❌ CRITICAL: DB Connection Error", err));
 
-// --- 3. PRODUCT ENGINE (UPLOAD & SECURITY) ---
+// --- 3. PRODUCT ENGINE (UPLOAD & SECURITY SCAN) ---
 
 app.post('/api/product/add', productAssets, async (req, res) => {
     try {
@@ -103,19 +108,24 @@ app.post('/api/product/add', productAssets, async (req, res) => {
             return res.status(400).json({ error: "Media Missing", guide: "Upload at least 1 image." });
         }
 
-        // 🛡️ COPYRIGHT NEURAL SCAN (Using First Image)
+        // 🛡️ COPYRIGHT NEURAL SCAN (Sharp Fingerprinting)
         const primaryImg = req.files['images'][0];
         const imageBuffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
         const currentHash = imageBuffer.toString('base64');
 
-        const duplicate = await Product.findOne({ imageHash: currentHash });
-        if (duplicate) {
-            // Delete all uploaded files if duplicate found
+        // Check Duplicate Design
+        const duplicateDesign = await Product.findOne({ imageHash: currentHash });
+        // Check Duplicate Title
+        const duplicateTitle = await Product.findOne({ name: { $regex: new RegExp(`^${name}$`, 'i') } });
+
+        if (duplicateDesign || duplicateTitle) {
+            // Cleanup files if security alert triggers
             Object.values(req.files).flat().forEach(f => fs.unlinkSync(f.path));
-            return res.status(403).json({ error: "Security Alert", guide: "Design already exists in Master Node." });
+            const errorMsg = duplicateDesign ? "Design already exists in Master Node." : "Product title must be unique.";
+            return res.status(403).json({ error: "Security Alert", guide: errorMsg });
         }
 
-        // Map paths for database
+        // Map paths for multiple images
         const savedImages = req.files['images'].map(f => f.filename);
         const savedVideo = req.files['video'] ? req.files['video'][0].filename : null;
 
@@ -144,7 +154,6 @@ app.post('/api/product/add', productAssets, async (req, res) => {
         });
 
     } catch (err) { 
-        // Cleanup on error
         if (req.files) {
             Object.values(req.files).flat().forEach(f => { if(fs.existsSync(f.path)) fs.unlinkSync(f.path) });
         }
@@ -152,7 +161,7 @@ app.post('/api/product/add', productAssets, async (req, res) => {
     }
 });
 
-// Smart Search (Updated for imagePaths array)
+// Smart Search
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
@@ -165,18 +174,13 @@ app.get('/api/products/search', async (req, res) => {
             const now = Date.now();
             const recentViews = (p.views24h || []).filter(v => new Date(v) > (now - 86400000)).length;
             const score = (recentViews * 2) + ((p.salesCount || 0) * 10) + (p.source === 'handmade' ? 100 : 0);
-            return { 
-                ...p, 
-                recentViews, 
-                score, 
-                thumbnail: p.imagePaths && p.imagePaths.length > 0 ? p.imagePaths[0] : null 
-            };
+            return { ...p, recentViews, score };
         }).sort((a, b) => b.score - a.score);
         res.json(results);
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 4. ORDER & ADMIN MODULES ---
+// --- 4. ORDERS & ADMIN ---
 
 app.get('/api/orders/supplier/:id', async (req, res) => {
     try {
@@ -197,19 +201,23 @@ app.post('/api/orders/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Admin Stats
-app.get('/api/admin/detailed-stats', async (req, res) => {
-    try {
-        const supplierPerformance = await Order.aggregate([
-            { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" } } },
-            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" } }, 
-            { $unwind: "$details" }
-        ]);
-        res.json({ supplierPerformance });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+// Admin Config Routes
+app.get('/api/admin/config', async (req, res) => {
+    const config = await getAppConfig();
+    res.json(config);
 });
 
-// --- 5. CHAT & SOCKET.IO ---
+app.post('/api/admin/config', async (req, res) => {
+    const { quarantineEnabled, quarantineDuration } = req.body;
+    const config = await SystemConfig.findOneAndUpdate(
+        { key: 'main_config' }, 
+        { quarantineEnabled, quarantineDuration }, 
+        { new: true, upsert: true }
+    );
+    res.json({ message: "Configuration Updated", config });
+});
+
+// --- 5. CHAT ENGINE & SOCKET ---
 
 const chatUpload = multer({ storage: storage });
 app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
@@ -219,10 +227,9 @@ app.post('/api/chat/upload', chatUpload.single('file'), (req, res) => {
 io.on('connection', (socket) => {
     socket.on('join_room', (userId) => socket.join(userId));
     socket.on('send_message', async (data) => {
-        // Simple filter for contact info
-        const filter = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-        if (data.text && filter.test(data.text)) {
-            return io.to(data.senderId).emit('error_message', "⚠️ Security: Info sharing blocked.");
+        const securityRegex = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+        if (data.text && securityRegex.test(data.text)) {
+            return io.to(data.senderId).emit('error_message', "⚠️ Security: Contact sharing blocked.");
         }
 
         let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
@@ -230,12 +237,11 @@ io.on('connection', (socket) => {
         
         const newMessage = new Message({ ...data, chatId: chat._id });
         await newMessage.save();
-
         io.to(data.receiverId).emit('receive_message', newMessage);
     });
 });
 
-// --- 6. AUTOMATION ---
+// --- 6. AUTOMATION (Auto-Approval) ---
 
 setInterval(async () => {
     const config = await getAppConfig();
@@ -245,7 +251,7 @@ setInterval(async () => {
         { status: 'pending', createdAt: { $lte: cutoff } }, 
         { $set: { status: 'approved' } }
     );
-}, 600000); // 10 minutes check
+}, 600000); // Checks every 10 mins
 
 const PORT = process.env.PORT || 80;
 server.listen(PORT, () => console.log(`🚀 POD Master Node operational on Port ${PORT}`));
