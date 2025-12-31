@@ -79,7 +79,7 @@ app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Active | v
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. ADVANCED PRODUCT ENGINE ---
+// --- 4. ADVANCED PRODUCT ENGINE (Neural Scan) ---
 const productAssets = upload.fields([
     { name: 'images', maxCount: 12 },
     { name: 'video', maxCount: 1 }
@@ -140,7 +140,7 @@ app.patch('/api/product/set-sale', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 6. SMART SEARCH ENGINE ---
+// --- 6. SMART SEARCH ENGINE (Etsy Style) ---
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
@@ -210,7 +210,6 @@ io.on('connection', (socket) => {
 
 // --- 11. SUPPLIER STOREFRONT & PROFILE ---
 
-// Update Shop Profile (Bio, Images, Announcement)
 app.put('/api/shop/update-profile', upload.fields([
     { name: 'profileImage', maxCount: 1 },
     { name: 'bannerImage', maxCount: 1 }
@@ -218,36 +217,33 @@ app.put('/api/shop/update-profile', upload.fields([
     try {
         const { userId, bio, announcement, storeName } = req.body;
         const updateData = { bio, announcement, storeName };
-        
         if (req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
         if (req.files['bannerImage']) updateData.bannerImage = req.files['bannerImage'][0].filename;
-
         const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true });
-        res.json({ message: "Shop Profile Updated! 🛡️", user: updatedUser });
+        res.json({ message: "Shop Profile Updated!", user: updatedUser });
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// Fetch Shop Data
 app.get('/api/shop/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
         if (!mongoose.Types.ObjectId.isValid(supplierId)) return res.status(400).send("Invalid ID");
-
-        // Fetch user with new profile fields
         const supplier = await User.findById(supplierId).select('name email storeName createdAt bio announcement profileImage bannerImage');
         const products = await Product.find({ supplier: supplierId, status: 'approved' }).sort({ createdAt: -1 });
         const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } }).populate('userId', 'name').sort({ createdAt: -1 });
-
-        res.json({
-            supplier,
-            products,
-            reviews,
-            totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0)
-        });
+        res.json({ supplier, products, reviews, totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 12. AUTOMATION & ADMIN ---
+// --- 12. SUPPLIER PRODUCT MANAGEMENT (For Settings/Edit) ---
+app.get('/api/supplier/products/:id', async (req, res) => {
+    try {
+        const products = await Product.find({ supplier: req.params.id }).sort({ createdAt: -1 });
+        res.json(products);
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 13. AUTOMATION & ADMIN ---
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
