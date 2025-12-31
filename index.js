@@ -128,7 +128,6 @@ app.post('/api/product/add', productAssets, async (req, res) => {
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
-        // 💡 Showing both for testing. Production change to: { status: 'approved' }
         let query = { status: { $in: ['approved', 'pending'] } }; 
         if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
         if (category && category !== 'All') query.category = category;
@@ -291,26 +290,31 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 11. SUPPLIER STOREFRONT API ---
+// --- 11. SUPPLIER STOREFRONT API (Updated with Reviews & Sales) ---
 app.get('/api/shop/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
-        
-        // 1. Get Supplier Profile
+        if (!mongoose.Types.ObjectId.isValid(supplierId)) return res.status(400).send("Invalid ID");
+
+        // 1. Get Supplier Data
         const supplier = await User.findById(supplierId).select('name email storeName createdAt');
         
-        // 2. Get All Approved Products of this Supplier
-        const products = await Product.find({ supplier: supplierId, status: 'approved' })
+        // 2. Get Products (Approved Only)
+        const products = await Product.find({ supplier: supplierId, status: 'approved' }).sort({ createdAt: -1 });
+
+        // 3. Get Reviews for all these products
+        const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } })
+            .populate('userId', 'name')
             .sort({ createdAt: -1 });
 
         res.json({
             supplier,
             products,
+            reviews,
+            totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0),
             totalProducts: products.length
         });
-    } catch (err) {
-        res.status(500).json({ error: "Storefront Offline", details: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- 12. AUTOMATION ---
