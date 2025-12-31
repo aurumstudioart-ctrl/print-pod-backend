@@ -291,7 +291,29 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 11. AUTOMATION ---
+// --- 11. SUPPLIER STOREFRONT API ---
+app.get('/api/shop/:id', async (req, res) => {
+    try {
+        const supplierId = req.params.id;
+        
+        // 1. Get Supplier Profile
+        const supplier = await User.findById(supplierId).select('name email storeName createdAt');
+        
+        // 2. Get All Approved Products of this Supplier
+        const products = await Product.find({ supplier: supplierId, status: 'approved' })
+            .sort({ createdAt: -1 });
+
+        res.json({
+            supplier,
+            products,
+            totalProducts: products.length
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Storefront Offline", details: err.message });
+    }
+});
+
+// --- 12. AUTOMATION ---
 
 setInterval(async () => {
     const config = await getAppConfig();
