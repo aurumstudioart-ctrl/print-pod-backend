@@ -6,7 +6,7 @@ const { Server } = require("socket.io");
 const path = require('path');
 const multer = require('multer'); 
 const fs = require('fs'); 
-const sharp = require('sharp'); // Copyright & Neural Scan
+const sharp = require('sharp'); 
 require('dotenv').config();
 
 const app = express();
@@ -20,7 +20,7 @@ const Message = require('./models/Message');
 const Order = require('./models/Order');
 const Withdrawal = require('./models/Withdrawal');
 
-// System Config Schema (Inline)
+// Inline Schemas for System Stability
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
@@ -28,7 +28,6 @@ const configSchema = new mongoose.Schema({
 });
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
 
-// Review Schema (Inline)
 const reviewSchema = new mongoose.Schema({
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -53,11 +52,15 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static('/app/uploads'));
 
 // DB Connection
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ SYSTEM: Master Database Connected & Verified"))
-    .catch(err => console.error("❌ CRITICAL: DB Error ->", err));
+mongoose.connect(process.env.MONGO_URI).then(() => console.log("✅ SYSTEM: Master Database Connected & Verified"));
 
-// Storage Setup
+const getAppConfig = async () => {
+    let config = await SystemConfig.findOne({ key: 'main_config' });
+    if (!config) { config = new SystemConfig(); await config.save(); }
+    return config;
+};
+
+// --- 3. STORAGE SETUP ---
 const uploadDir = '/app/uploads';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -67,158 +70,112 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-const getAppConfig = async () => {
-    let config = await SystemConfig.findOne({ key: 'main_config' });
-    if (!config) { config = new SystemConfig(); await config.save(); }
-    return config;
-};
+// Multi-purpose upload handlers
+const productAssets = upload.fields([{ name: 'images', maxCount: 12 }, { name: 'video', maxCount: 1 }]);
+const profileUpload = upload.fields([{ name: 'profileImage', maxCount: 1 }, { name: 'bannerImage', maxCount: 1 }]);
 
-// --- 3. CORE APIs ---
-app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Active | v3.0 Secured ✅'));
+// --- 4. CORE APIs & DASHBOARD STATS ---
+
+app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Operational | v3.1 Secured ✅'));
+
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. ADVANCED PRODUCT ENGINE (Neural Scan) ---
-const productAssets = upload.fields([
-    { name: 'images', maxCount: 12 },
-    { name: 'video', maxCount: 1 }
-]);
+// FIXED SUPPLIER STATS (Prevent Dashboard Crash)
+app.get('/api/supplier/stats/:id', async (req, res) => {
+    try {
+        const supplierId = req.params.id;
+        if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
+
+        const products = await Product.countDocuments({ supplier: supplierId });
+        const user = await User.findById(supplierId);
+        
+        // Approved Payouts Calculation
+        const approvedWithdrawals = await Withdrawal.aggregate([
+            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        
+        const pendingWithdrawalsCount = await Withdrawal.countDocuments({ user: supplierId, status: 'pending' });
+
+        res.json({ 
+            products, 
+            balance: user?.walletBalance || 0, 
+            withdrawn: approvedWithdrawals[0]?.total || 0, 
+            pendingRequests: pendingWithdrawalsCount 
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- 5. CHAT ENGINE (With Unread Logic) ---
+
+app.get('/api/chat/unread/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined') return res.json({ total: 0, perChat: {} });
+
+        const chats = await Chat.find({ participants: userId });
+        const chatIds = chats.map(c => c._id);
+        const unreadMessages = await Message.find({ chatId: { $in: chatIds }, sender: { $ne: userId }, status: { $ne: 'seen' } });
+
+        const unreadMap = {};
+        unreadMessages.forEach(msg => {
+            const cId = msg.chatId.toString();
+            unreadMap[cId] = (unreadMap[cId] || 0) + 1;
+        });
+        res.json({ total: unreadMessages.length, perChat: unreadMap });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/chat/conversations/:userId', async (req, res) => {
+    try {
+        const data = await Chat.find({ participants: req.params.userId }).populate('participants', 'name email role').sort({ lastMessageTime: -1 });
+        res.json(data);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/chat/messages/:chatId', async (req, res) => {
+    try {
+        const data = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
+        res.json(data);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- 6. ADVANCED PRODUCT ENGINE (Neural Scan & Discount) ---
 
 app.post('/api/product/add', productAssets, async (req, res) => {
     try {
         const { name, description, basePrice, supplierId, category, tags, variations, source, isPhysical } = req.body;
-        if (!req.files || !req.files['images']) return res.status(400).send("Images required.");
-
         const primaryImg = req.files['images'][0];
         const imageBuffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
         const currentHash = imageBuffer.toString('base64');
 
-        const isDuplicate = await Product.findOne({ imageHash: currentHash });
-        if (isDuplicate) {
-            Object.values(req.files).flat().forEach(f => fs.unlinkSync(f.path));
-            return res.status(403).json({ error: "Copyright Alert", guide: "This design already exists." });
+        if (await Product.findOne({ imageHash: currentHash })) {
+            return res.status(403).json({ error: "Copyright Alert: Duplicate Design Found." });
         }
 
         const config = await getAppConfig();
-        const savedImages = req.files['images'].map(f => f.filename);
-
         const newProduct = new Product({
-            name, description, basePrice, category,
-            supplier: supplierId,
-            imagePaths: savedImages,
-            tags: tags ? tags.split(',') : [],
-            variations: variations ? JSON.parse(variations) : [],
-            source: source || 'handmade',
-            isPhysical: isPhysical === 'true',
-            imageHash: currentHash,
-            status: config.quarantineEnabled ? 'pending' : 'approved'
+            name, description, basePrice, category, supplier: supplierId,
+            imagePaths: req.files['images'].map(f => f.filename),
+            imageHash: currentHash, status: config.quarantineEnabled ? 'pending' : 'approved'
         });
-
         await newProduct.save();
         res.json({ message: "Neural Scan Passed!" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 5. SALE & DISCOUNT ENGINE ---
 app.patch('/api/product/set-sale', async (req, res) => {
     const { productId, discountPercentage, onSale } = req.body;
     try {
         const product = await Product.findById(productId);
         const salePrice = onSale ? (product.basePrice * (1 - discountPercentage / 100)).toFixed(2) : product.basePrice;
         await Product.findByIdAndUpdate(productId, { onSale, discountPercentage, salePrice });
-        res.json({ message: "Sale status updated!" });
+        res.json({ message: "Sale status synced!" });
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 6. SMART SEARCH ENGINE ---
-app.get('/api/products/search', async (req, res) => {
-    const { q, category } = req.query;
-    try {
-        let query = { status: { $in: ['approved', 'pending'] } }; 
-        if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
-        if (category && category !== 'All') query.category = category;
-        const products = await Product.find(query).populate('supplier', 'name').lean();
-        const results = products.map(p => ({ ...p, score: (p.salesCount || 0) * 10 })).sort((a, b) => b.score - a.score);
-        res.json(results);
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 7. WALLET & WITHDRAWAL ---
-app.get('/api/wallet/:userId', async (req, res) => {
-    const user = await User.findById(req.params.userId);
-    res.json({ balance: user ? user.walletBalance : 0 });
-});
-
-app.post('/api/wallet/withdraw', async (req, res) => {
-    const user = await User.findById(req.body.userId);
-    if (!user || user.walletBalance < req.body.amount) return res.status(400).json({ message: "Low Balance" });
-    await User.findByIdAndUpdate(req.body.userId, { $inc: { walletBalance: -req.body.amount } });
-    const newReq = new Withdrawal({ user: req.body.userId, amount: req.body.amount, status: 'pending' });
-    await newReq.save();
-    res.json({ message: "Request Sent" });
-});
-
-// --- 8. ORDER SYSTEM (Fixed Dashboard Loading) ---
-app.post('/api/orders/create', async (req, res) => {
-    try {
-        const newOrder = new Order(req.body);
-        await newOrder.save();
-        await Product.findByIdAndUpdate(req.body.productId, { $inc: { salesCount: 1 } });
-        res.json({ message: "Order Success", orderId: newOrder._id });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/orders/supplier/:id', async (req, res) => {
-    try {
-        const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
-        res.json(data);
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-app.get('/api/orders/seller/:id', async (req, res) => {
-    try {
-        const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name').sort({ createdAt: -1 });
-        res.json(data);
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 9. STATS & ANALYTICS (Dashboard Fix) ---
-app.get('/api/supplier/stats/:id', async (req, res) => {
-    try {
-        const supplierId = req.params.id;
-        if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
-        const prodCount = await Product.countDocuments({ supplier: supplierId });
-        const orders = await Order.find({ supplierId: supplierId });
-        const user = await User.findById(supplierId);
-        const totalSales = orders.reduce((acc, curr) => acc + curr.totalPrice, 0);
-        res.json({ 
-            products: prodCount, 
-            balance: user ? user.walletBalance : 0, 
-            totalSales: totalSales,
-            orderCount: orders.length 
-        });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 10. CHAT SYSTEM & SOCKETS ---
-io.on('connection', (socket) => {
-  socket.on('join_room', (userId) => socket.join(userId));
-  socket.on('send_message', async (data) => {
-    if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
-        return io.to(data.senderId).emit('error_message', "⚠️ Blocked: contact info sharing.");
-    }
-    let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
-    if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); await chat.save(); }
-    const newMessage = new Message({ ...data, chatId: chat._id, status: 'delivered' }); await newMessage.save();
-    io.to(data.receiverId).emit('receive_message', newMessage);
-  });
-});
-
-// --- 11. SHOP PROFILE & SLIDER MANAGEMENT (Array Logic) ---
-const profileUpload = upload.fields([
-    { name: 'profileImage', maxCount: 1 },
-    { name: 'bannerImage', maxCount: 1 }
-]);
+// --- 7. SHOP PROFILE & BANNER SLIDER LOGIC ---
 
 app.put('/api/shop/update-profile', profileUpload, async (req, res) => {
     try {
@@ -263,15 +220,36 @@ app.get('/api/shop/:id', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 12. SUPPLIER PRODUCT MANAGEMENT ---
-app.get('/api/supplier/products/:id', async (req, res) => {
+// --- 8. WALLET & ORDERS ---
+
+app.get('/api/wallet/:userId', async (req, res) => {
+    const user = await User.findById(req.params.userId);
+    res.json({ balance: user?.walletBalance || 0 });
+});
+
+app.get('/api/orders/supplier/:id', async (req, res) => {
     try {
-        const products = await Product.find({ supplier: req.params.id }).sort({ createdAt: -1 });
-        res.json(products);
+        const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
+        res.json(data);
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 13. AUTOMATION & ADMIN ---
+// --- 9. SOCKET LOGIC (Security & Notifications) ---
+io.on('connection', (socket) => {
+  socket.on('join_room', (userId) => socket.join(userId));
+  socket.on('send_message', async (data) => {
+    if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
+        return io.to(data.senderId).emit('error_message', "⚠️ Security Blocked: Contact sharing forbidden.");
+    }
+    let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
+    if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); await chat.save(); }
+    const newMessage = new Message({ ...data, chatId: chat._id, status: 'delivered' }); await newMessage.save();
+    io.to(data.receiverId).emit('receive_message', newMessage);
+    io.to(data.receiverId).emit('notification', { from: data.senderId, chatId: chat._id });
+  });
+});
+
+// --- 10. AUTOMATION & ADMIN ---
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
@@ -279,11 +257,5 @@ setInterval(async () => {
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
 }, 600000);
 
-app.get('/api/admin/config', async (req, res) => res.json(await getAppConfig()));
-app.post('/api/admin/config', async (req, res) => {
-    await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true });
-    res.json({ message: "Synced" });
-});
-
 const PORT = 80;
-server.listen(PORT, () => console.log(`🚀 Master Node operational on Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Master Node fully operational on Port ${PORT}`));
