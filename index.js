@@ -6,13 +6,13 @@ const { Server } = require("socket.io");
 const path = require('path');
 const multer = require('multer'); 
 const fs = require('fs'); 
-const sharp = require('sharp'); 
+const sharp = require('sharp'); // Copyright & Neural Scan
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 
-// --- 1. MODELS LOADING ---
+// --- 1. MODELS LOADING (Top-level) ---
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Chat = require('./models/Chat');
@@ -20,15 +20,15 @@ const Message = require('./models/Message');
 const Order = require('./models/Order');
 const Withdrawal = require('./models/Withdrawal');
 
-// SYSTEM CONFIG MODEL
+// System Config Schema (Inline)
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
-    quarantineDuration: { type: Number, default: 180 }, 
+    quarantineDuration: { type: Number, default: 180 }, // Minutes
 });
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
 
-// Inline Review Model
+// Review Schema (Inline)
 const reviewSchema = new mongoose.Schema({
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -44,7 +44,7 @@ const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB
+  maxHttpBufferSize: 5e7 // 50 MB for high-res designs
 });
 
 app.use(cors());
@@ -52,15 +52,16 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static('/app/uploads'));
 
-// DB Connection Logic
-const mongoURI = process.env.MONGO_URI;
-mongoose.connect(mongoURI)
-    .then(() => console.log("✅ SYSTEM: Master Database Linked"))
-    .catch(err => console.error("❌ CRITICAL: DB Error", err));
+// DB Connection
+mongoose.connect(process.env.MONGO_URI)
+    .then(() => console.log("✅ SYSTEM: Master Database Connected & Verified"))
+    .catch(err => console.error("❌ CRITICAL: DB Error ->", err));
 
 // Storage Setup
 const uploadDir = '/app/uploads';
+const tempDir = 'temp/';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir), 
@@ -68,7 +69,6 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Helper to get config
 const getAppConfig = async () => {
     let config = await SystemConfig.findOne({ key: 'main_config' });
     if (!config) { config = new SystemConfig(); await config.save(); }
@@ -76,12 +76,12 @@ const getAppConfig = async () => {
 };
 
 // --- 3. CORE APIs & LANDING ---
-app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Active | v3.0 Secured'));
+app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Active | v3.0 Secured ✅'));
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. ADVANCED PRODUCT ENGINE (Copyright & Variations) ---
+// --- 4. ADVANCED PRODUCT ENGINE (Multi-Upload + Security) ---
 
 const productAssets = upload.fields([
     { name: 'images', maxCount: 12 },
@@ -100,7 +100,7 @@ app.post('/api/product/add', productAssets, async (req, res) => {
         const isDuplicate = await Product.findOne({ imageHash: currentHash });
         if (isDuplicate) {
             Object.values(req.files).flat().forEach(f => fs.unlinkSync(f.path));
-            return res.status(403).json({ error: "Copyright Alert", guide: "Design already exists." });
+            return res.status(403).json({ error: "Copyright Alert", guide: "This design already exists." });
         }
 
         const config = await getAppConfig();
@@ -123,12 +123,13 @@ app.post('/api/product/add', productAssets, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 5. SEARCH & ANALYTICS ---
+// --- 5. SMART SEARCH ENGINE (Etsy Logic) ---
 
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
-        let query = { status: 'approved' };
+        // 💡 Showing both for testing. Production change to: { status: 'approved' }
+        let query = { status: { $in: ['approved', 'pending'] } }; 
         if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
         if (category && category !== 'All') query.category = category;
 
@@ -143,23 +144,15 @@ app.get('/api/products/search', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-app.get('/api/supplier/stats/:id', async (req, res) => {
-    try {
-        const user = await User.findById(req.params.id);
-        const products = await Product.countDocuments({ supplier: req.params.id });
-        res.json({ products, balance: user ? user.walletBalance : 0, withdrawn: 0, pendingRequests: 0 });
-    } catch (err) { res.status(500).send(err.message); }
+app.get('/api/products/suggestions', async (req, res) => {
+    const { q } = req.query;
+    if (!q) return res.json([]);
+    const data = await Product.find({ $or: [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }] })
+        .limit(6).select('name category tags');
+    res.json(data);
 });
 
-app.get('/api/admin/detailed-stats', async (req, res) => {
-    try {
-        const suppliers = await User.countDocuments({ role: 'supplier' });
-        const sellers = await User.countDocuments({ role: 'seller' });
-        res.json({ userStats: { sellers, suppliers }, revenueTimeline: [] });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 6. WALLET & ORDER APIs ---
+// --- 6. WALLET & WITHDRAWAL (Hold Logic) ---
 
 app.get('/api/wallet/:userId', async (req, res) => {
     const user = await User.findById(req.params.userId);
@@ -173,34 +166,122 @@ app.post('/api/wallet/pay', async (req, res) => {
     res.json({ message: "Verified" });
 });
 
+app.post('/api/wallet/withdraw', async (req, res) => {
+    const user = await User.findById(req.body.userId);
+    if (!user || user.walletBalance < req.body.amount) return res.status(400).json({ message: "Low Balance" });
+    
+    await User.findByIdAndUpdate(req.body.userId, { $inc: { walletBalance: -req.body.amount } }); // HOLD
+    const newReq = new Withdrawal({ user: req.body.userId, amount: req.body.amount, status: 'pending' });
+    await newReq.save();
+    res.json({ message: "Request Sent" });
+});
+
+app.post('/api/admin/withdrawals/action', async (req, res) => {
+    const request = await Withdrawal.findById(req.body.id);
+    if (req.body.action === 'rejected') {
+        await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } }); // REFUND
+    }
+    request.status = req.body.action;
+    await request.save();
+    res.json({ message: "Status Updated" });
+});
+
+app.get('/api/admin/withdrawals', async (req, res) => {
+    const data = await Withdrawal.find().populate('user', 'name email role walletBalance').sort({ createdAt: -1 });
+    res.json(data);
+});
+
+// --- 7. ORDER SYSTEM ---
+
+app.post('/api/orders/create', async (req, res) => {
+    try {
+        const newOrder = new Order(req.body);
+        await newOrder.save();
+        await Product.findByIdAndUpdate(req.body.productId, { $inc: { salesCount: 1 } });
+        res.json({ message: "Order Success", orderId: newOrder._id });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/orders/supplier/:id', async (req, res) => {
     const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
     res.json(data);
 });
 
-// --- 7. CHAT & SOCKET SYSTEM ---
+app.get('/api/orders/seller/:id', async (req, res) => {
+    const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name').sort({ createdAt: -1 });
+    res.json(data);
+});
+
+app.patch('/api/orders/status', async (req, res) => {
+    await Order.findByIdAndUpdate(req.body.orderId, { status: req.body.status });
+    res.json({ message: "Status Updated" });
+});
+
+// --- 8. STATS & ANALYTICS ---
+
+app.get('/api/admin/detailed-stats', async (req, res) => {
+    try {
+        const supplierPerformance = await Order.aggregate([
+            { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" } }},
+            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" }},
+            { $unwind: "$details" }
+        ]);
+        const userStats = {
+            sellers: await User.countDocuments({ role: 'seller' }),
+            suppliers: await User.countDocuments({ role: 'supplier' }),
+            pendingPayouts: await Withdrawal.countDocuments({ status: 'pending' })
+        };
+        res.json({ supplierPerformance, userStats, revenueTimeline: [] });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/supplier/stats/:id', async (req, res) => {
+    try {
+        const supplierId = req.params.id;
+        if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
+        const prodCount = await Product.countDocuments({ supplier: supplierId });
+        const user = await User.findById(supplierId);
+        res.json({ products: prodCount, balance: user ? user.walletBalance : 0, withdrawn: 0, pendingRequests: 0 });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 9. CHAT SYSTEM & UNREAD ---
 
 app.get('/api/chat/unread/:userId', async (req, res) => {
     try {
-        const chats = await Chat.find({ participants: req.params.userId });
-        const unreadMessages = await Message.find({ chatId: { $in: chats.map(c => c._id) }, sender: { $ne: req.params.userId }, status: { $ne: 'seen' } });
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined') return res.json({ total: 0, perChat: {} });
+        const chats = await Chat.find({ participants: userId });
+        const chatIds = chats.map(c => c._id);
+        const unread = await Message.find({ chatId: { $in: chatIds }, sender: { $ne: userId }, status: { $ne: 'seen' } });
         const unreadMap = {};
-        unreadMessages.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
-        res.json({ total: unreadMessages.length, perChat: unreadMap });
+        unread.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
+        res.json({ total: unread.length, perChat: unreadMap });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/chat/conversations/:userId', async (req, res) => {
+    if (!req.params.userId || req.params.userId === 'undefined') return res.json([]);
     const data = await Chat.find({ participants: req.params.userId }).populate('participants', 'name email role').sort({ lastMessageTime: -1 });
     res.json(data);
 });
 
+app.get('/api/chat/messages/:chatId', async (req, res) => {
+    const data = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
+    res.json(data);
+});
+
+// --- 10. SOCKET.IO ENGINE ---
+
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   socket.on('send_message', async (data) => {
+    if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
+        return io.to(data.senderId).emit('error_message', "⚠️ Blocked: contact info sharing.");
+    }
     let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
     if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); await chat.save(); }
-    chat.lastMessage = data.text || '📷 Media'; chat.lastMessageTime = Date.now(); await chat.save();
+    chat.lastMessage = data.text || '📷 Attachment'; chat.lastMessageTime = Date.now(); await chat.save();
     const newMessage = new Message({ ...data, chatId: chat._id, status: 'delivered' }); await newMessage.save();
     io.to(data.receiverId).emit('receive_message', newMessage);
     io.to(data.receiverId).emit('notification', { from: data.senderId, chatId: chat._id });
@@ -210,18 +291,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// Admin System APIs
-app.get('/api/admin/config', async (req, res) => {
-    const config = await getAppConfig();
-    res.json(config);
-});
+// --- 11. AUTOMATION ---
 
-app.post('/api/admin/config', async (req, res) => {
-    await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true });
-    res.json({ message: "Config Updated" });
-});
-
-// Auto-Approve Worker
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
@@ -229,5 +300,12 @@ setInterval(async () => {
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
 }, 600000);
 
+// Admin Config
+app.get('/api/admin/config', async (req, res) => res.json(await getAppConfig()));
+app.post('/api/admin/config', async (req, res) => {
+    await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true });
+    res.json({ message: "Synced" });
+});
+
 const PORT = 80;
-server.listen(PORT, () => console.log(`🚀 Master operational on Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Master Node operational on Port ${PORT}`));
