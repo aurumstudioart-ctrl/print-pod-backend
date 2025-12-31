@@ -140,7 +140,7 @@ app.patch('/api/product/set-sale', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 6. SMART SEARCH ENGINE (Etsy Style) ---
+// --- 6. SMART SEARCH ENGINE ---
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
@@ -208,20 +208,36 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 11. SUPPLIER STOREFRONT & PROFILE ---
+// --- 11. SUPPLIER STOREFRONT & PROFILE UPDATE ---
 
-app.put('/api/shop/update-profile', upload.fields([
+// Multer setup specifically for profile/banner images
+const profileUpload = upload.fields([
     { name: 'profileImage', maxCount: 1 },
     { name: 'bannerImage', maxCount: 1 }
-]), async (req, res) => {
+]);
+
+app.put('/api/shop/update-profile', profileUpload, async (req, res) => {
     try {
-        const { userId, bio, announcement, storeName } = req.body;
-        const updateData = { bio, announcement, storeName };
-        if (req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
-        if (req.files['bannerImage']) updateData.bannerImage = req.files['bannerImage'][0].filename;
+        const { userId, storeName, bio, announcement } = req.body;
+        const updateData = {};
+        
+        if (storeName) updateData.storeName = storeName;
+        if (bio) updateData.bio = bio;
+        if (announcement) updateData.announcement = announcement;
+        
+        // Handling file uploads for profile and banner
+        if (req.files && req.files['profileImage']) {
+            updateData.profileImage = req.files['profileImage'][0].filename;
+        }
+        if (req.files && req.files['bannerImage']) {
+            updateData.bannerImage = req.files['bannerImage'][0].filename;
+        }
+
         const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true });
-        res.json({ message: "Shop Profile Updated!", user: updatedUser });
-    } catch (err) { res.status(500).send(err.message); }
+        res.json({ message: "Profile Updated! 🚀", user: updatedUser });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/shop/:id', async (req, res) => {
@@ -235,7 +251,7 @@ app.get('/api/shop/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 12. SUPPLIER PRODUCT MANAGEMENT (For Settings/Edit) ---
+// --- 12. SUPPLIER PRODUCT MANAGEMENT ---
 app.get('/api/supplier/products/:id', async (req, res) => {
     try {
         const products = await Product.find({ supplier: req.params.id }).sort({ createdAt: -1 });
