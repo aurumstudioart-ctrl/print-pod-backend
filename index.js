@@ -79,7 +79,7 @@ app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Active | v
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. ADVANCED PRODUCT ENGINE (Neural Scan) ---
+// --- 4. ADVANCED PRODUCT ENGINE (Neural Scan & Copyright Protection) ---
 const productAssets = upload.fields([
     { name: 'images', maxCount: 12 },
     { name: 'video', maxCount: 1 }
@@ -140,7 +140,7 @@ app.patch('/api/product/set-sale', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 6. SMART SEARCH ENGINE ---
+// --- 6. SMART SEARCH ENGINE (Etsy Logic) ---
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
@@ -159,7 +159,7 @@ app.get('/api/products/search', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 7. WALLET & WITHDRAWAL ---
+// --- 7. WALLET, WITHDRAWAL & ORDERS ---
 app.get('/api/wallet/:userId', async (req, res) => {
     const user = await User.findById(req.params.userId);
     res.json({ balance: user ? user.walletBalance : 0 });
@@ -174,7 +174,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     res.json({ message: "Request Sent" });
 });
 
-// --- 8. ORDER SYSTEM ---
 app.post('/api/orders/create', async (req, res) => {
     try {
         const newOrder = new Order(req.body);
@@ -184,7 +183,7 @@ app.post('/api/orders/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 9. CHAT SYSTEM ---
+// --- 8. CHAT SYSTEM & SOCKETS (With Privacy Filter) ---
 app.get('/api/chat/unread/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
@@ -194,7 +193,6 @@ app.get('/api/chat/unread/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 10. SOCKET.IO ENGINE ---
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   socket.on('send_message', async (data) => {
@@ -208,8 +206,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 11. SUPPLIER STOREFRONT & PROFILE UPDATE ---
-
+// --- 9. SUPPLIER SHOP PROFILE UPDATE (Sync Route) ---
 const profileUpload = upload.fields([
     { name: 'profileImage', maxCount: 1 },
     { name: 'bannerImage', maxCount: 1 }
@@ -217,26 +214,27 @@ const profileUpload = upload.fields([
 
 app.put('/api/shop/update-profile', profileUpload, async (req, res) => {
     try {
-        const { userId, storeName, bio, announcement } = req.body;
+        const { userId, storeName, announcement, bio } = req.body;
         const updateData = {};
+        
         if (storeName) updateData.storeName = storeName;
-        if (bio) updateData.bio = bio;
         if (announcement) updateData.announcement = announcement;
+        if (bio) updateData.bio = bio;
+        
         if (req.files && req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
         if (req.files && req.files['bannerImage']) updateData.bannerImage = req.files['bannerImage'][0].filename;
 
-        const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true });
-        res.json({ message: "Profile Updated! 🚀", user: updatedUser });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        await User.findByIdAndUpdate(userId, updateData);
+        res.json({ message: "Sync Successful" });
+    } catch (err) { res.status(500).send(err.message); }
 });
 
-// UPDATED SHOP FETCH ROUTE 🚩
+// --- 10. STOREFRONT DATA API (With Sales & Reviews) ---
 app.get('/api/shop/:id', async (req, res) => {
     try {
         const supplierId = req.params.id;
         if (!mongoose.Types.ObjectId.isValid(supplierId)) return res.status(400).send("Invalid ID");
 
-        // Ensure all profile fields are selected
         const supplier = await User.findById(supplierId)
              .select('name email storeName createdAt profileImage bannerImage bio announcement'); 
         
@@ -255,7 +253,7 @@ app.get('/api/shop/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 12. SUPPLIER PRODUCT MANAGEMENT ---
+// --- 11. SUPPLIER PRODUCT MANAGEMENT ---
 app.get('/api/supplier/products/:id', async (req, res) => {
     try {
         const products = await Product.find({ supplier: req.params.id }).sort({ createdAt: -1 });
@@ -263,7 +261,7 @@ app.get('/api/supplier/products/:id', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 13. AUTOMATION & ADMIN ---
+// --- 12. AUTOMATION & ADMIN SYSTEM ---
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
