@@ -75,11 +75,10 @@ const getAppConfig = async () => {
 
 // --- 3. CORE APIs ---
 app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node Active | v3.0 Secured ✅'));
-
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. ADVANCED PRODUCT ENGINE (Neural Scan & Copyright Protection) ---
+// --- 4. ADVANCED PRODUCT ENGINE (Neural Scan) ---
 const productAssets = upload.fields([
     { name: 'images', maxCount: 12 },
     { name: 'video', maxCount: 1 }
@@ -125,41 +124,26 @@ app.patch('/api/product/set-sale', async (req, res) => {
     const { productId, discountPercentage, onSale } = req.body;
     try {
         const product = await Product.findById(productId);
-        if (!product) return res.status(404).send("Product not found");
-
-        const salePrice = onSale 
-            ? (product.basePrice * (1 - discountPercentage / 100)).toFixed(2) 
-            : product.basePrice;
-        
-        await Product.findByIdAndUpdate(productId, { 
-            onSale, 
-            discountPercentage, 
-            salePrice 
-        });
-        res.json({ message: "Sale status updated!", salePrice });
+        const salePrice = onSale ? (product.basePrice * (1 - discountPercentage / 100)).toFixed(2) : product.basePrice;
+        await Product.findByIdAndUpdate(productId, { onSale, discountPercentage, salePrice });
+        res.json({ message: "Sale status updated!" });
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 6. SMART SEARCH ENGINE (Etsy Logic) ---
+// --- 6. SMART SEARCH ENGINE ---
 app.get('/api/products/search', async (req, res) => {
     const { q, category } = req.query;
     try {
         let query = { status: { $in: ['approved', 'pending'] } }; 
         if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
         if (category && category !== 'All') query.category = category;
-
         const products = await Product.find(query).populate('supplier', 'name').lean();
-        const results = products.map(p => {
-            const now = Date.now();
-            const recentViews = (p.views24h || []).filter(v => new Date(v) > (now - 86400000)).length;
-            const score = (recentViews * 2) + ((p.salesCount || 0) * 10) + (p.source === 'handmade' ? 100 : 0);
-            return { ...p, recentViews, score };
-        }).sort((a, b) => b.score - a.score);
+        const results = products.map(p => ({ ...p, score: (p.salesCount || 0) * 10 })).sort((a, b) => b.score - a.score);
         res.json(results);
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 7. WALLET, WITHDRAWAL & ORDERS ---
+// --- 7. WALLET & WITHDRAWAL ---
 app.get('/api/wallet/:userId', async (req, res) => {
     const user = await User.findById(req.params.userId);
     res.json({ balance: user ? user.walletBalance : 0 });
@@ -168,12 +152,13 @@ app.get('/api/wallet/:userId', async (req, res) => {
 app.post('/api/wallet/withdraw', async (req, res) => {
     const user = await User.findById(req.body.userId);
     if (!user || user.walletBalance < req.body.amount) return res.status(400).json({ message: "Low Balance" });
-    await User.findByIdAndUpdate(req.body.userId, { $inc: { walletBalance: -req.body.amount } }); 
+    await User.findByIdAndUpdate(req.body.userId, { $inc: { walletBalance: -req.body.amount } });
     const newReq = new Withdrawal({ user: req.body.userId, amount: req.body.amount, status: 'pending' });
     await newReq.save();
     res.json({ message: "Request Sent" });
 });
 
+// --- 8. ORDER SYSTEM (Fixed Dashboard Loading) ---
 app.post('/api/orders/create', async (req, res) => {
     try {
         const newOrder = new Order(req.body);
@@ -183,16 +168,39 @@ app.post('/api/orders/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 8. CHAT SYSTEM & SOCKETS (With Privacy Filter) ---
-app.get('/api/chat/unread/:userId', async (req, res) => {
+app.get('/api/orders/supplier/:id', async (req, res) => {
     try {
-        const { userId } = req.params;
-        const chats = await Chat.find({ participants: userId });
-        const unread = await Message.find({ chatId: { $in: chats.map(c => c._id) }, sender: { $ne: userId }, status: { $ne: 'seen' } });
-        res.json({ total: unread.length });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
+        res.json(data);
+    } catch (err) { res.status(500).send(err.message); }
 });
 
+app.get('/api/orders/seller/:id', async (req, res) => {
+    try {
+        const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name').sort({ createdAt: -1 });
+        res.json(data);
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 9. STATS & ANALYTICS (Dashboard Fix) ---
+app.get('/api/supplier/stats/:id', async (req, res) => {
+    try {
+        const supplierId = req.params.id;
+        if (!supplierId || supplierId === 'undefined') return res.status(400).send("ID missing");
+        const prodCount = await Product.countDocuments({ supplier: supplierId });
+        const orders = await Order.find({ supplierId: supplierId });
+        const user = await User.findById(supplierId);
+        const totalSales = orders.reduce((acc, curr) => acc + curr.totalPrice, 0);
+        res.json({ 
+            products: prodCount, 
+            balance: user ? user.walletBalance : 0, 
+            totalSales: totalSales,
+            orderCount: orders.length 
+        });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 10. CHAT SYSTEM & SOCKETS ---
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   socket.on('send_message', async (data) => {
@@ -206,7 +214,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 9. SUPPLIER SHOP PROFILE UPDATE (Sync Route) ---
+// --- 11. SHOP PROFILE & SLIDER MANAGEMENT (Array Logic) ---
 const profileUpload = upload.fields([
     { name: 'profileImage', maxCount: 1 },
     { name: 'bannerImage', maxCount: 1 }
@@ -214,46 +222,48 @@ const profileUpload = upload.fields([
 
 app.put('/api/shop/update-profile', profileUpload, async (req, res) => {
     try {
-        const { userId, storeName, announcement, bio } = req.body;
-        const updateData = {};
-        
-        if (storeName) updateData.storeName = storeName;
-        if (announcement) updateData.announcement = announcement;
-        if (bio) updateData.bio = bio;
-        
-        if (req.files && req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
-        if (req.files && req.files['bannerImage']) updateData.bannerImage = req.files['bannerImage'][0].filename;
+        const { userId, storeName, announcement, bannerAnimation, bannerInterval, bio } = req.body;
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).send("User not found");
 
-        await User.findByIdAndUpdate(userId, updateData);
-        res.json({ message: "Sync Successful" });
+        let updateData = {
+            storeName: storeName || user.storeName,
+            announcement: announcement || user.announcement,
+            bio: bio || user.bio,
+            bannerAnimation: bannerAnimation || user.bannerAnimation || 'fade',
+            bannerInterval: bannerInterval || user.bannerInterval || 5000
+        };
+        
+        if (req.files) {
+            if (req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
+            if (req.files['bannerImage']) {
+                const newBanner = req.files['bannerImage'][0].filename;
+                updateData.bannerImages = user.bannerImages ? [...user.bannerImages, newBanner] : [newBanner];
+            }
+        }
+        const updated = await User.findByIdAndUpdate(userId, { $set: updateData }, { new: true });
+        res.json({ message: "Cloud Sync Successful 🚀", user: updated });
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 10. STOREFRONT DATA API (With Sales & Reviews) ---
-app.get('/api/shop/:id', async (req, res) => {
+app.post('/api/shop/delete-banner', async (req, res) => {
     try {
-        const supplierId = req.params.id;
-        if (!mongoose.Types.ObjectId.isValid(supplierId)) return res.status(400).send("Invalid ID");
-
-        const supplier = await User.findById(supplierId)
-             .select('name email storeName createdAt profileImage bannerImage bio announcement'); 
-        
-        const products = await Product.find({ supplier: supplierId, status: 'approved' }).sort({ createdAt: -1 });
-        
-        const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } })
-            .populate('userId', 'name')
-            .sort({ createdAt: -1 });
-
-        res.json({ 
-            supplier, 
-            products, 
-            reviews, 
-            totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) 
-        });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        const { userId, filename } = req.body;
+        await User.findByIdAndUpdate(userId, { $pull: { bannerImages: filename } });
+        res.json({ message: "Banner Removed" });
+    } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 11. SUPPLIER PRODUCT MANAGEMENT ---
+app.get('/api/shop/:id', async (req, res) => {
+    try {
+        const supplier = await User.findById(req.params.id)
+             .select('name email storeName createdAt profileImage bannerImages bio announcement bannerAnimation bannerInterval'); 
+        const products = await Product.find({ supplier: req.params.id, status: 'approved' });
+        res.json({ supplier, products, totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 12. SUPPLIER PRODUCT MANAGEMENT ---
 app.get('/api/supplier/products/:id', async (req, res) => {
     try {
         const products = await Product.find({ supplier: req.params.id }).sort({ createdAt: -1 });
@@ -261,7 +271,7 @@ app.get('/api/supplier/products/:id', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 12. AUTOMATION & ADMIN SYSTEM ---
+// --- 13. AUTOMATION & ADMIN ---
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
