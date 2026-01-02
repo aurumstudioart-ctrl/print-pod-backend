@@ -12,7 +12,7 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-// --- 1. MODELS LOADING ---
+// --- 1. MASTER MODELS ---
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Chat = require('./models/Chat');
@@ -20,7 +20,7 @@ const Message = require('./models/Message');
 const Order = require('./models/Order');
 const Withdrawal = require('./models/Withdrawal');
 
-// Inline System Config Model
+// Inline Config Model (System Settings)
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
@@ -29,22 +29,21 @@ const configSchema = new mongoose.Schema({
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
 
 // Inline Review Model
-const reviewSchema = new mongoose.Schema({
+const Review = mongoose.models.Review || mongoose.model('Review', new mongoose.Schema({
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     rating: { type: Number, min: 1, max: 5 },
     comment: String,
     createdAt: { type: Date, default: Date.now }
-});
-const Review = mongoose.models.Review || mongoose.model('Review', reviewSchema);
+}));
 
-// --- 2. CONFIGURATION & SECURITY ---
+// --- 2. CONFIGURATION & LIMITS ---
 const PHONE_REGEX = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB limit
+  maxHttpBufferSize: 5e7 // 50 MB limit for assets
 });
 
 app.use(cors());
@@ -52,12 +51,12 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static('/app/uploads'));
 
-// DB Connection
+// Database Connection
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ SYSTEM: Master Node DB Synced & Secured"))
+    .then(() => console.log("✅ SYSTEM: Master Database Connected & Synced"))
     .catch(err => console.error("❌ DB ERROR:", err));
 
-// Storage Setup
+// Storage Engine Setup
 const uploadDir = '/app/uploads';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -76,257 +75,188 @@ const getAppConfig = async () => {
     return config;
 };
 
-// --- 3. BASIC ROUTES ---
-app.get('/', (req, res) => res.status(200).send('🚀 POD Super Master Node v5.0 | All Systems Nominal ✅'));
+// --- 3. UNIVERSAL HELPER: ERROR GUARD ---
+const safeQuery = (fn) => async (req, res, next) => {
+    try { await fn(req, res, next); } 
+    catch (e) { 
+        console.error("❌ Neural Node Error:", e.message); 
+        res.status(500).json({ error: "System Error", details: e.message }); 
+    }
+};
+
+// --- 4. CORE APIs ---
+app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node v5.0 | All Systems Operational ✅'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. PRODUCT ENGINE (Neural Scan + Management) ---
-const productAssets = upload.fields([{ name: 'images', maxCount: 12 }, { name: 'video', maxCount: 1 }]);
+// --- 5. SMART SEARCH & RANKING ALGORITHM 🔍 ---
 
-app.post('/api/product/add', productAssets, async (req, res) => {
-    try {
-        const { name, description, basePrice, supplierId, category, tags, source, isPhysical } = req.body;
-        if (!req.files || !req.files['images']) return res.status(400).send("Images required.");
-
-        // Neural Scan for Duplicate Design (Copyright Protection)
-        const primaryImg = req.files['images'][0];
-        const imageBuffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
-        const currentHash = imageBuffer.toString('base64');
-
-        if (await Product.findOne({ imageHash: currentHash })) {
-            return res.status(403).json({ error: "Copyright Block", guide: "This design already exists in our database." });
-        }
-
-        const config = await getAppConfig();
-        const newProduct = new Product({
-            name, description, basePrice, category, supplier: supplierId,
-            imagePaths: req.files['images'].map(f => f.filename),
-            imageHash: currentHash, 
-            status: config.quarantineEnabled ? 'pending' : 'approved',
-            source, isPhysical: isPhysical === 'true', tags: tags ? tags.split(',') : []
-        });
-        await newProduct.save();
-        res.json({ message: "Neural Scan Passed! Product uploaded." });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/supplier/products/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        if (!id || id === 'undefined') return res.json([]);
-        const products = await Product.find({ supplier: id }).sort({ createdAt: -1 });
-        res.json(products);
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-app.patch('/api/product/set-sale', async (req, res) => {
-    const { productId, discountPercentage, onSale } = req.body;
-    try {
-        const product = await Product.findById(productId);
-        const salePrice = onSale ? (product.basePrice * (1 - discountPercentage / 100)).toFixed(2) : product.basePrice;
-        await Product.findByIdAndUpdate(productId, { onSale, discountPercentage, salePrice });
-        res.json({ message: "Sale status updated!" });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 5. SMART SEARCH & ANALYTICS ---
-
-app.get('/api/products/search', async (req, res) => {
+app.get(['/api/products/search', '/api/product/search'], safeQuery(async (req, res) => {
     const { q, category } = req.query;
-    try {
-        let query = { status: 'approved' }; 
-        if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
-        if (category && category !== 'All') query.category = category;
+    let query = { status: 'approved' }; 
+    
+    if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
+    if (category && category !== 'All') query.category = category;
 
-        const products = await Product.find(query).populate('supplier', 'name').lean();
-        const results = products.map(p => ({
-            ...p,
-            score: (p.clickCount || 0) + (p.source === 'handmade' ? 100 : 0)
-        })).sort((a, b) => b.score - a.score);
-        res.json(results);
-    } catch (err) { res.status(500).send(err.message); }
-});
+    const products = await Product.find(query).populate('supplier', 'name storeName').lean();
+    
+    // Etsy-Style Scoring: Views (24h) + Sales + Handmade Boost
+    const scoredResults = products.map(p => {
+        const recentViews = (p.views24h || []).filter(v => new Date(v) > (Date.now() - 86400000)).length;
+        const score = (recentViews * 2) + ((p.salesCount || 0) * 10) + (p.source === 'handmade' ? 100 : 0);
+        return { ...p, score, recentViews };
+    }).sort((a, b) => b.score - a.score);
 
-app.get('/api/admin/detailed-stats', async (req, res) => {
-    try {
-        const suppliers = await User.countDocuments({ role: 'supplier' });
-        const sellers = await User.countDocuments({ role: 'seller' });
-        const revenueTimeline = await Order.aggregate([
-            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, dailyRevenue: { $sum: "$totalPrice" } } },
-            { $sort: { "_id": -1 } }, { $limit: 15 }
-        ]);
-        const supplierPerformance = await Order.aggregate([
-            { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" } } },
-            { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" } },
-            { $unwind: "$details" }
-        ]);
-        res.json({ userStats: { sellers, suppliers }, revenueTimeline, supplierPerformance });
-    } catch (err) { res.status(500).send(err.message); }
-});
+    res.json(scoredResults);
+}));
 
-app.get('/api/supplier/stats/:id', async (req, res) => {
-    try {
-        const supplierId = req.params.id;
-        const user = await User.findById(supplierId);
-        const productsCount = await Product.countDocuments({ supplier: supplierId });
-        const orders = await Order.find({ supplierId: supplierId });
-        const approvedWithdrawals = await Withdrawal.aggregate([
-            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
-            { $group: { _id: null, total: { $sum: "$amount" } } }
-        ]);
-        res.json({ 
-            products: productsCount, 
-            balance: user?.walletBalance || 0, 
-            withdrawn: approvedWithdrawals[0]?.total || 0, 
-            pendingOrders: orders.filter(o => o.status === 'pending').length 
-        });
-    } catch (err) { res.status(500).send(err.message); }
-});
+app.get('/api/products/suggestions', safeQuery(async (req, res) => {
+    const data = await Product.find({ name: { $regex: req.query.q, $options: 'i' }, status: 'approved' })
+        .limit(6).select('name category');
+    res.json(data);
+}));
 
-// --- 6. SHOP PROFILE & BANNER SYSTEM ---
+app.post('/api/products/track-visit', safeQuery(async (req, res) => {
+    const { productId } = req.body;
+    const yesterday = new Date(Date.now() - 86400000);
+    await Product.findByIdAndUpdate(productId, {
+        $push: { views24h: new Date() },
+        $pull: { views24h: { $lt: yesterday } },
+        $inc: { clickCount: 1 }
+    });
+    res.json({ success: true });
+}));
 
-const profileUpload = upload.fields([{ name: 'profileImage', maxCount: 1 }, { name: 'bannerImage', maxCount: 1 }]);
+// --- 6. FINTECH (Wallet, Treasury & Withdrawals) ---
 
-app.put('/api/shop/update-profile', profileUpload, async (req, res) => {
-    try {
-        const { userId, storeName, announcement, bannerAnimation, bannerInterval, bio } = req.body;
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).send("User not found");
+app.get('/api/wallet/:userId', safeQuery(async (req, res) => {
+    const user = await User.findById(req.params.userId);
+    res.json({ balance: user ? user.walletBalance : 0 });
+}));
 
-        let updateData = {
-            storeName: storeName || user.storeName,
-            announcement: announcement || user.announcement,
-            bio: bio || user.bio,
-            bannerAnimation: bannerAnimation || user.bannerAnimation || 'fade',
-            bannerInterval: bannerInterval || user.bannerInterval || 5000
-        };
-        
-        if (req.files) {
-            if (req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
-            if (req.files['bannerImage']) {
-                const newBanner = req.files['bannerImage'][0].filename;
-                updateData.bannerImages = user.bannerImages ? [...user.bannerImages, newBanner] : [newBanner];
-            }
-        }
-        await User.findByIdAndUpdate(userId, { $set: updateData });
-        res.json({ message: "Shop updated successfully!" });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-app.get('/api/shop/:id', async (req, res) => {
-    try {
-        const supplier = await User.findById(req.params.id)
-             .select('name email storeName createdAt profileImage bannerImages bio announcement bannerAnimation bannerInterval'); 
-        const products = await Product.find({ supplier: req.params.id, status: 'approved' }).sort({ createdAt: -1 });
-        const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } }).populate('userId', 'name');
-        res.json({ supplier, products, reviews, totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 7. WALLET & WITHDRAWALS ---
-
-app.get('/api/wallet/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        if (!userId || userId === 'undefined') return res.json({ balance: 0 });
-        const user = await User.findById(userId);
-        res.json({ balance: user ? user.walletBalance : 0 });
-    } catch (err) { res.status(500).json({ error: "Wallet not found" }); }
-});
-
-app.post('/api/wallet/withdraw', async (req, res) => {
+app.post('/api/wallet/pay', safeQuery(async (req, res) => {
     const { userId, amount } = req.body;
     const user = await User.findById(userId);
-    if (!user || user.walletBalance < amount) return res.status(400).send("Low Funds");
+    if (!user || user.walletBalance < amount) return res.status(400).json({ message: "Low Balance" });
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
-    const newReq = new Withdrawal({ user: userId, amount, status: 'pending' });
-    await newReq.save();
-    res.json({ message: "Withdrawal request submitted!" });
-});
+    res.json({ message: "Payment Successful" });
+}));
 
-app.get('/api/admin/withdrawals', async (req, res) => {
-    try {
-        const data = await Withdrawal.find().populate('user', 'name email role walletBalance').sort({ createdAt: -1 });
-        res.json(data);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.post('/api/wallet/withdraw', safeQuery(async (req, res) => {
+    const { userId, amount } = req.body;
+    const user = await User.findById(userId);
+    if (!user || user.walletBalance < amount) return res.status(400).json({ message: "Insufficient Funds" });
+    
+    await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } }); // Immediate Deduct (Escrow)
+    await new Withdrawal({ user: userId, amount, status: 'pending' }).save();
+    res.json({ message: "Withdrawal Request Submitted" });
+}));
 
-app.post('/api/admin/withdrawals/action', async (req, res) => {
-    try {
-        const { id, action } = req.body;
-        const request = await Withdrawal.findById(id);
-        if (!request || request.status !== 'pending') return res.status(400).send("Invalid request");
-        if (action === 'rejected') await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
-        request.status = action;
-        await request.save();
-        res.json({ message: "Action Successful" });
-    } catch (err) { res.status(500).send(err.message); }
-});
+app.get('/api/admin/withdrawals', safeQuery(async (req, res) => {
+    const data = await Withdrawal.find().populate('user', 'name email role walletBalance').sort({ createdAt: -1 });
+    res.json(data);
+}));
 
-// --- 8. ORDERS SYSTEM ---
+app.post('/api/admin/withdrawals/action', safeQuery(async (req, res) => {
+    const { id, action } = req.body; // action: 'approved' or 'rejected'
+    const request = await Withdrawal.findById(id);
+    if (!request || request.status !== 'pending') return res.status(400).send("Invalid Request");
 
-app.get('/api/orders/supplier/:id', async (req, res) => {
-    try {
-        const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
-        res.json(data);
-    } catch (err) { res.status(500).send(err.message); }
-});
+    if (action === 'rejected') {
+        await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } }); // Refund
+    }
+    request.status = action;
+    await request.save();
+    res.json({ message: `Request ${action} successfully` });
+}));
 
-app.post('/api/orders/create', async (req, res) => {
-    try {
-        const newOrder = new Order(req.body);
-        await newOrder.save();
-        res.json({ message: "Order Success", orderId: newOrder._id });
-    } catch (err) { res.status(500).send(err.message); }
-});
+// --- 7. ORDER & LOGISTICS ---
 
-// --- 9. CHAT ENGINE (Fixed 404s & History) ---
+app.post('/api/orders/create', safeQuery(async (req, res) => {
+    const newOrder = new Order(req.body);
+    await newOrder.save();
+    await Product.findByIdAndUpdate(req.body.productId, { $inc: { salesCount: 1 } });
+    res.json({ message: "Order Placed", orderId: newOrder._id });
+}));
 
-app.get('/api/chat/conversations/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        if (!userId || userId === 'undefined') return res.json([]);
-        const data = await Chat.find({ participants: userId }).populate('participants', 'name email role').sort({ lastMessageTime: -1 });
-        res.json(data);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.get(['/api/orders/supplier/:id', '/api/order/supplier/:id'], safeQuery(async (req, res) => {
+    const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name imagePaths').sort({ createdAt: -1 });
+    res.json(data);
+}));
 
-app.get('/api/chat/messages/:chatId', async (req, res) => {
-    try {
-        const { chatId } = req.params;
-        if (!chatId || chatId === 'undefined') return res.json([]);
-        const messages = await Message.find({ chatId }).sort({ createdAt: 1 });
-        res.json(messages);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.get(['/api/orders/seller/:id', '/api/order/seller/:id'], safeQuery(async (req, res) => {
+    const data = await Order.find({ sellerId: req.params.id }).populate('productId', 'name imagePaths').sort({ createdAt: -1 });
+    res.json(data);
+}));
 
-app.get('/api/chat/unread/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        if (!userId || userId === 'undefined') return res.json({ total: 0, perChat: {} });
-        const chats = await Chat.find({ participants: userId });
-        const unread = await Message.find({ chatId: { $in: chats.map(c=>c._id) }, sender: { $ne: userId }, status: { $ne: 'seen' } });
-        const unreadMap = {};
-        unread.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
-        res.json({ total: unread.length, perChat: unreadMap });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.patch('/api/orders/status', safeQuery(async (req, res) => {
+    await Order.findByIdAndUpdate(req.body.orderId, { status: req.body.status });
+    res.json({ message: "Status Updated" });
+}));
 
-// --- 10. SOCKET LOGIC (Security + Live Updates) ---
+// --- 8. STATS & ANALYTICS ---
+
+app.get(['/api/admin/detailed-stats', '/api/admin/stats'], safeQuery(async (req, res) => {
+    const suppliers = await User.countDocuments({ role: 'supplier' });
+    const sellers = await User.countDocuments({ role: 'seller' });
+    const revenue = await Order.aggregate([{ $group: { _id: null, total: { $sum: "$totalPrice" } } }]);
+    const supplierPerformance = await Order.aggregate([
+        { $group: { _id: "$supplierId", totalOrders: { $sum: 1 }, revenue: { $sum: "$totalPrice" } } },
+        { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" } },
+        { $unwind: "$details" }
+    ]);
+    res.json({ userStats: { sellers, suppliers }, totalRevenue: revenue[0]?.total || 0, supplierPerformance });
+}));
+
+app.get('/api/supplier/stats/:id', safeQuery(async (req, res) => {
+    const user = await User.findById(req.params.id);
+    const products = await Product.countDocuments({ supplier: req.params.id });
+    const orders = await Order.find({ supplierId: req.params.id });
+    const withdrawn = await Withdrawal.aggregate([
+        { $match: { user: new mongoose.Types.ObjectId(req.params.id), status: 'approved' } },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]);
+    res.json({ 
+        products, 
+        balance: user?.walletBalance || 0, 
+        withdrawn: withdrawn[0]?.total || 0, 
+        pendingOrders: orders.filter(o => o.status === 'pending').length 
+    });
+}));
+
+// --- 9. CHAT ENGINE & SOCKETS ---
+
+app.get('/api/chat/conversations/:userId', safeQuery(async (req, res) => {
+    const data = await Chat.find({ participants: req.params.userId }).populate('participants', 'name email role profileImage').sort({ lastMessageTime: -1 });
+    res.json(data);
+}));
+
+app.get('/api/chat/messages/:chatId', safeQuery(async (req, res) => {
+    const data = await Message.find({ chatId: req.params.chatId }).sort({ createdAt: 1 });
+    res.json(data);
+}));
+
+app.get('/api/chat/unread/:userId', safeQuery(async (req, res) => {
+    const chats = await Chat.find({ participants: req.params.userId });
+    const unread = await Message.find({ chatId: { $in: chats.map(c=>c._id) }, sender: { $ne: req.params.userId }, status: { $ne: 'seen' } });
+    const unreadMap = {};
+    unread.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
+    res.json({ total: unread.length, perChat: unreadMap });
+}));
 
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   
   socket.on('send_message', async (data) => {
+    // Security Block: Contact Info Sharing
     if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
-        return io.to(data.senderId).emit('error_message', "⚠️ Security: Contact sharing is not allowed.");
+        return io.to(data.senderId).emit('error_message', "⚠️ Security: Sharing contact details is restricted.");
     }
     
     let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
-    if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); }
+    if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); await chat.save(); }
     
-    chat.lastMessage = data.text || '📷 Media'; 
+    chat.lastMessage = data.text || '📷 Attachment'; 
     chat.lastMessageTime = Date.now(); 
     await chat.save();
     
@@ -342,24 +272,48 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 11. ADMIN CONFIG & AUTOMATION ---
+// --- 10. PRODUCT ENGINE (Neural Scan + Management) ---
 
-app.get('/api/admin/config', async (req, res) => {
+app.post('/api/product/add', upload.fields([{ name: 'images', maxCount: 12 }, { name: 'video', maxCount: 1 }]), safeQuery(async (req, res) => {
+    if (!req.files || !req.files['images']) return res.status(400).send("Images required.");
+
+    // Neural Scan: Copyright Check (Using Image Hashing)
+    const primaryImg = req.files['images'][0];
+    const buffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
+    const currentHash = buffer.toString('base64');
+
+    if (await Product.findOne({ imageHash: currentHash })) {
+        return res.status(403).json({ error: "Copyright Detected", message: "This design already exists." });
+    }
+
     const config = await getAppConfig();
-    res.json(config);
-});
+    const newProduct = new Product({
+        ...req.body,
+        supplier: req.body.supplierId,
+        imagePaths: req.files['images'].map(f => f.filename),
+        imageHash: currentHash,
+        status: config.quarantineEnabled ? 'pending' : 'approved',
+        tags: req.body.tags ? req.body.tags.split(',') : []
+    });
+    await newProduct.save();
+    res.json({ message: "Neural Scan Passed. Product Live." });
+}));
 
-app.post('/api/admin/config', async (req, res) => {
-    const config = await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true, new: true });
-    res.json(config);
-});
+// --- 11. AUTOMATION & ADMIN CONFIG ---
 
+app.get('/api/admin/config', async (req, res) => res.json(await getAppConfig()));
+app.post('/api/admin/config', safeQuery(async (req, res) => {
+    await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true });
+    res.json({ message: "Configuration Updated" });
+}));
+
+// Quarantine Auto-Approval (Every 10 Minutes)
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
     const cutoff = new Date(Date.now() - config.quarantineDuration * 60 * 1000);
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
-}, 600000); // Runs every 10 mins
+}, 600000);
 
 const PORT = process.env.PORT || 80;
 server.listen(PORT, () => console.log(`🚀 MASTER NODE v5.0 operational on Port ${PORT}`));
