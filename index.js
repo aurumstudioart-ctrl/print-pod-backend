@@ -13,7 +13,6 @@ const app = express();
 const server = http.createServer(app);
 
 // --- 1. DATABASE MODELS LOADING ---
-// Ensuring all schemas exist before routes use them
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Chat = require('./models/Chat');
@@ -80,7 +79,7 @@ const getAppConfig = async () => {
     return config;
 };
 
-// Universal Error Guard (Prevents 404/Crashes on bad IDs)
+// Universal Error Guard
 const safeQuery = (fn) => async (req, res, next) => {
     try { await fn(req, res, next); } 
     catch (e) { console.error("❌ Node Error:", e.message); res.json([]); }
@@ -92,14 +91,13 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
 // --- 4. PRODUCTION ENGINE (Multi-Upload + Neural Scan) 🛡️ ---
-
 const productUpload = upload.fields([{ name: 'images', maxCount: 12 }, { name: 'video', maxCount: 1 }]);
 
 app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
     const { name, basePrice, supplierId, variations, tags } = req.body;
     if (!req.files || !req.files['images']) return res.status(400).send("Primary asset missing.");
 
-    // A. Neural Copyright Scan (Sharp Fingerprinting)
+    // A. Neural Copyright Scan
     const primaryImg = req.files['images'][0];
     const buffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
     const hash = buffer.toString('base64');
@@ -109,7 +107,6 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
     }
 
     const config = await getAppConfig();
-
     const newProd = new Product({
         ...req.body,
         supplier: supplierId,
@@ -127,17 +124,14 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
 }));
 
 // --- 5. SEARCH & DISCOVERY ENGINE (Etsy Logic) 🔍 ---
-
 app.get(['/api/products/search', '/api/product/search'], safeQuery(async (req, res) => {
     const { q, category } = req.query;
-    // Show approved + pending for the supplier/admin, but normally just approved
     let query = { status: { $in: ['approved', 'pending'] } }; 
     if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
     if (category && category !== 'All') query.category = category;
 
     const products = await Product.find(query).populate('supplier', 'name').lean();
     
-    // ALGORITHM: View-Velocity + Sales + Handmade Boost
     const scored = products.map(p => {
         const recentViews = (p.views24h || []).filter(v => new Date(v) > (Date.now() - 86400000)).length;
         const score = (recentViews * 2) + ((p.salesCount || 0) * 10) + (p.source === 'handmade' ? 100 : 0);
@@ -176,7 +170,6 @@ app.patch('/api/product/set-sale', safeQuery(async (req, res) => {
 }));
 
 // --- 6. FINTECH SYSTEM (Wallet, Hold & Treasury) 💸 ---
-
 app.get('/api/wallet/:userId', safeQuery(async (req, res) => {
     const user = await User.findById(req.params.userId);
     res.json({ balance: user ? user.walletBalance : 0 });
@@ -192,7 +185,6 @@ app.post('/api/wallet/pay', safeQuery(async (req, res) => {
 
 app.post('/api/wallet/withdraw', safeQuery(async (req, res) => {
     const { userId, amount } = req.body;
-    // 🛡️ HOLD LOGIC: Immediate deduction on request
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     await new Withdrawal({ user: userId, amount, status: 'pending' }).save();
     res.json({ message: "Funds placed on hold for verification." });
@@ -207,7 +199,6 @@ app.post('/api/admin/withdrawals/action', safeQuery(async (req, res) => {
     const { id, action } = req.body;
     const request = await Withdrawal.findById(id);
     if (action === 'rejected') {
-        // 🔄 REFUND LOGIC: Return funds if rejected
         await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
     }
     request.status = action;
@@ -216,7 +207,6 @@ app.post('/api/admin/withdrawals/action', safeQuery(async (req, res) => {
 }));
 
 // --- 7. LOGISTICS & ORDER SYSTEM 🛒 ---
-
 app.post(['/api/orders/create', '/api/order/create'], safeQuery(async (req, res) => {
     const newOrder = new Order(req.body);
     await newOrder.save();
@@ -240,7 +230,6 @@ app.patch(['/api/orders/status', '/api/order/status'], safeQuery(async (req, res
 }));
 
 // --- 8. COMMUNICATION HUB (Real-time Chat) 💬 ---
-
 app.get(['/api/chat/unread/:userId', '/api/chat/unread-count/:userId'], safeQuery(async (req, res) => {
     const chats = await Chat.find({ participants: req.params.userId });
     const chatIds = chats.map(c => c._id);
@@ -265,7 +254,6 @@ app.post('/api/chat/upload', upload.single('file'), (req, res) => {
 });
 
 // --- 9. MASTER ANALYTICS & SUPPLIER HUB 📊 ---
-
 app.get(['/api/admin/detailed-stats', '/api/admin/analytics'], safeQuery(async (req, res) => {
     const suppliers = await User.countDocuments({ role: 'supplier' });
     const sellers = await User.countDocuments({ role: 'seller' });
@@ -295,7 +283,6 @@ app.get('/api/supplier/products/:id', safeQuery(async (req, res) => {
 }));
 
 // --- 10. MASTER ADMIN CONTROLS 👥 ---
-
 app.get('/api/admin/users', safeQuery(async (req, res) => {
     const users = await User.find({}).select('-password').sort({ createdAt: -1 });
     res.json(users);
@@ -314,7 +301,6 @@ app.post('/api/admin/users/wallet-adjust', safeQuery(async (req, res) => {
 }));
 
 // --- 11. SHOP PROFILE & STOREFRONT 🏬 ---
-
 const profileUpload = upload.fields([{ name: 'profileImage', maxCount: 1 }, { name: 'bannerImage', maxCount: 1 }]);
 app.put('/api/shop/update-profile', profileUpload, safeQuery(async (req, res) => {
     const { userId } = req.body;
@@ -336,13 +322,13 @@ app.get('/api/shop/:id', safeQuery(async (req, res) => {
 }));
 
 // --- 12. SOCKET.IO ENGINE ---
-
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   
   socket.on('send_message', async (data) => {
-    const spamRegex = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-    if (data.text && spamRegex.test(data.text)) return io.to(data.senderId).emit('error_message', "⚠️ Blocked: Contact sharing forbidden.");
+    if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
+        return io.to(data.senderId).emit('error_message', "⚠️ Blocked: Contact sharing forbidden.");
+    }
 
     let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
     if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); await chat.save(); }
@@ -364,15 +350,44 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 13. MASTER AUTOMATION ---
+// --- 13. SUPPLIER PRODUCT PLUGIN APIs (NEW) 🛠️ ---
 
+app.put('/api/product/update/:id', safeQuery(async (req, res) => {
+    const { id } = req.params;
+    const updateData = req.body;
+    if (updateData.basePrice && updateData.discountPercentage) {
+        updateData.salePrice = (updateData.basePrice * (1 - updateData.discountPercentage / 100)).toFixed(2);
+    }
+    const updatedProduct = await Product.findByIdAndUpdate(id, updateData, { new: true });
+    res.json({ message: "Product Optimized!", product: updatedProduct });
+}));
+
+app.delete('/api/product/delete/:id', safeQuery(async (req, res) => {
+    const { id } = req.params;
+    const product = await Product.findById(id);
+    if (!product) return res.status(404).send("Asset not found");
+
+    if (product.imagePaths && product.imagePaths.length > 0) {
+        product.imagePaths.forEach(imgName => {
+            const fullPath = path.join('/app/uploads', imgName);
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+        });
+    }
+    if (product.videoPath) {
+        const videoPath = path.join('/app/uploads', product.videoPath);
+        if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
+    }
+    await Product.findByIdAndDelete(id);
+    res.json({ message: "Asset purged from Master Node and 30TB Disk." });
+}));
+
+// --- 14. MASTER AUTOMATION ---
 app.get('/api/admin/config', async (req, res) => res.json(await getAppConfig()));
 app.post('/api/admin/config', async (req, res) => {
     await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true });
     res.json({ success: true });
 });
 
-// Auto-Approve Quarantine Worker
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
