@@ -82,7 +82,7 @@ const getAppConfig = async () => {
 // Universal Error Guard
 const safeQuery = (fn) => async (req, res, next) => {
     try { await fn(req, res, next); } 
-    catch (e) { console.error("❌ Node Error:", e.message); res.json([]); }
+    catch (e) { console.error("❌ Node Error:", e.message); res.status(500).json({ error: e.message }); }
 };
 
 // --- 3. IDENTITY & CORE APIs ---
@@ -113,8 +113,8 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
         supplier: supplierId,
         imagePaths: req.files['images'].map(f => f.filename),
         videoPath: req.files['video'] ? req.files['video'][0].filename : null,
-        tags: tags ? tags.split(',') : [],
-        variations: variations ? JSON.parse(variations) : [],
+        tags: typeof tags === 'string' ? tags.split(',') : tags,
+        variations: typeof variations === 'string' ? JSON.parse(variations) : variations,
         imageHash: hash,
         status: config.quarantineEnabled ? 'pending' : 'approved',
         salesCount: 0,
@@ -133,7 +133,6 @@ app.get(['/api/products/search', '/api/product/search'], safeQuery(async (req, r
 
     const products = await Product.find(query).populate('supplier', 'name').lean();
     
-    // ALGORITHM: View-Velocity + Sales + Handmade Boost
     const scored = products.map(p => {
         const recentViews = (p.views24h || []).filter(v => new Date(v) > (Date.now() - 86400000)).length;
         const score = (recentViews * 2) + ((p.salesCount || 0) * 10) + (p.source === 'handmade' ? 100 : 0);
@@ -187,7 +186,6 @@ app.post('/api/wallet/pay', safeQuery(async (req, res) => {
 
 app.post('/api/wallet/withdraw', safeQuery(async (req, res) => {
     const { userId, amount } = req.body;
-    // 🛡️ HOLD LOGIC: Immediate deduction on request
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     await new Withdrawal({ user: userId, amount, status: 'pending' }).save();
     res.json({ message: "Funds placed on hold for verification." });
@@ -202,7 +200,6 @@ app.post('/api/admin/withdrawals/action', safeQuery(async (req, res) => {
     const { id, action } = req.body;
     const request = await Withdrawal.findById(id);
     if (action === 'rejected') {
-        // 🔄 REFUND LOGIC: Return funds if rejected
         await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
     }
     request.status = action;
@@ -330,7 +327,6 @@ io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   
   socket.on('send_message', async (data) => {
-    // 🛡️ SPAM & CONTACT FILTER
     if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
         return io.to(data.senderId).emit('error_message', "⚠️ Blocked: Contact sharing forbidden.");
     }
@@ -362,7 +358,6 @@ app.put('/api/product/update/:id', safeQuery(async (req, res) => {
     const { id } = req.params;
     const updateData = req.body;
     
-    // Logic: Agar basePrice ya discount update ho rahi hai toh salePrice recalculate karo
     if (updateData.basePrice && updateData.discountPercentage) {
         updateData.salePrice = (updateData.basePrice * (1 - updateData.discountPercentage / 100)).toFixed(2);
     }
@@ -371,7 +366,7 @@ app.put('/api/product/update/:id', safeQuery(async (req, res) => {
     res.json({ message: "Product Optimized!", product: updatedProduct });
 }));
 
-// B. Delete Product (Cleanup Logic - Clears Disk Space) 🗑️
+// B. Delete Product (Physical File Cleanup Logic) 🗑️
 app.delete('/api/product/delete/:id', safeQuery(async (req, res) => {
     const { id } = req.params;
     const product = await Product.findById(id);
@@ -381,7 +376,7 @@ app.delete('/api/product/delete/:id', safeQuery(async (req, res) => {
     if (product.imagePaths && product.imagePaths.length > 0) {
         product.imagePaths.forEach(imgName => {
             const fullPath = path.join('/app/uploads', imgName);
-            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); // Hard delete from disk
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); 
         });
     }
     if (product.videoPath) {
@@ -400,7 +395,6 @@ app.post('/api/admin/config', async (req, res) => {
     res.json({ success: true });
 });
 
-// Auto-Approve Quarantine Worker
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
