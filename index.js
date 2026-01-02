@@ -86,7 +86,7 @@ const safeQuery = (fn) => async (req, res, next) => {
 };
 
 // --- 3. IDENTITY & CORE APIs ---
-app.get('/', (req, res) => res.status(200).send('🚀 Master Node v5.0 Fully Operational | All Systems Nominal ✅'));
+app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node v5.1 Fully Operational ✅'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
@@ -127,7 +127,9 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
 
 app.get(['/api/products/search', '/api/product/search'], safeQuery(async (req, res) => {
     const { q, category } = req.query;
-    let query = { status: 'approved' }; // Prod mode: Only show approved
+    // Show approved normally, show pending if specifically needed for testing
+    let query = { status: { $in: ['approved', 'pending'] } }; 
+    
     if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
     if (category && category !== 'All') query.category = category;
 
@@ -161,6 +163,14 @@ app.post('/api/products/track-visit', safeQuery(async (req, res) => {
 app.get('/api/products/suggestions', safeQuery(async (req, res) => {
     const data = await Product.find({ name: { $regex: req.query.q, $options: 'i' } }).limit(6).select('name category');
     res.json(data);
+}));
+
+app.patch('/api/product/set-sale', safeQuery(async (req, res) => {
+    const { productId, discountPercentage, onSale } = req.body;
+    const product = await Product.findById(productId);
+    const salePrice = onSale ? (product.basePrice * (1 - discountPercentage / 100)).toFixed(2) : product.basePrice;
+    await Product.findByIdAndUpdate(productId, { onSale, discountPercentage, salePrice });
+    res.json({ success: true });
 }));
 
 // --- 6. FINTECH SYSTEM (Wallet, Hold & Treasury) 💸 ---
@@ -205,7 +215,7 @@ app.post('/api/admin/withdrawals/action', safeQuery(async (req, res) => {
 
 // --- 7. LOGISTICS & ORDER SYSTEM 🛒 ---
 
-app.post('/api/orders/create', safeQuery(async (req, res) => {
+app.post(['/api/orders/create', '/api/order/create'], safeQuery(async (req, res) => {
     const newOrder = new Order(req.body);
     await newOrder.save();
     await Product.findByIdAndUpdate(req.body.productId, { $inc: { salesCount: 1 } });
@@ -222,7 +232,7 @@ app.get(['/api/orders/seller/:id', '/api/order/seller/:id'], safeQuery(async (re
     res.json(data);
 }));
 
-app.patch('/api/orders/status', safeQuery(async (req, res) => {
+app.patch(['/api/orders/status', '/api/order/status'], safeQuery(async (req, res) => {
     await Order.findByIdAndUpdate(req.body.orderId, { status: req.body.status });
     res.json({ message: "Status Synced" });
 }));
@@ -252,9 +262,9 @@ app.post('/api/chat/upload', upload.single('file'), (req, res) => {
     res.json({ filePath: `http://print-api.129.80.92.53.nip.io/uploads/${req.file.filename}` });
 });
 
-// --- 9. MASTER ANALYTICS HUD 📊 ---
+// --- 9. MASTER ANALYTICS & SUPPLIER HUB 📊 ---
 
-app.get('/api/admin/detailed-stats', safeQuery(async (req, res) => {
+app.get(['/api/admin/detailed-stats', '/api/admin/analytics'], safeQuery(async (req, res) => {
     const suppliers = await User.countDocuments({ role: 'supplier' });
     const sellers = await User.countDocuments({ role: 'seller' });
     const supplierPerformance = await Order.aggregate([
@@ -262,7 +272,11 @@ app.get('/api/admin/detailed-stats', safeQuery(async (req, res) => {
         { $lookup: { from: "users", localField: "_id", foreignField: "_id", as: "details" } },
         { $unwind: "$details" }
     ]);
-    res.json({ userStats: { sellers, suppliers }, supplierPerformance });
+    const revenueTimeline = await Order.aggregate([
+        { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, dailyRevenue: { $sum: "$totalPrice" }, orderCount: { $sum: 1 } } },
+        { $sort: { "_id": -1 } }, { $limit: 15 }
+    ]);
+    res.json({ userStats: { sellers, suppliers }, supplierPerformance, revenueTimeline });
 }));
 
 app.get('/api/supplier/stats/:id', safeQuery(async (req, res) => {
@@ -278,7 +292,7 @@ app.get('/api/supplier/products/:id', safeQuery(async (req, res) => {
     res.json(data);
 }));
 
-// --- 10. USER CONTROL CENTER 👥 ---
+// --- 10. USER CONTROL CENTER & SHOP PROFILE 👥 ---
 
 app.get('/api/admin/users', safeQuery(async (req, res) => {
     const users = await User.find({}).select('-password').sort({ createdAt: -1 });
@@ -295,6 +309,26 @@ app.post('/api/admin/users/wallet-adjust', safeQuery(async (req, res) => {
     const mult = action === 'add' ? 1 : -1;
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: (amount * mult) } });
     res.json({ success: true });
+}));
+
+const profileUpload = upload.fields([{ name: 'profileImage', maxCount: 1 }, { name: 'bannerImage', maxCount: 1 }]);
+app.put('/api/shop/update-profile', profileUpload, safeQuery(async (req, res) => {
+    const { userId } = req.body;
+    const updateData = { ...req.body };
+    if (req.files['profileImage']) updateData.profileImage = req.files['profileImage'][0].filename;
+    if (req.files['bannerImage']) {
+        const user = await User.findById(userId);
+        updateData.bannerImages = user.bannerImages ? [...user.bannerImages, req.files['bannerImage'][0].filename] : [req.files['bannerImage'][0].filename];
+    }
+    await User.findByIdAndUpdate(userId, { $set: updateData });
+    res.json({ success: true });
+}));
+
+app.get('/api/shop/:id', safeQuery(async (req, res) => {
+    const supplier = await User.findById(req.params.id).select('name email storeName createdAt profileImage bannerImages bio announcement'); 
+    const products = await Product.find({ supplier: req.params.id, status: 'approved' }).sort({ createdAt: -1 });
+    const reviews = await Review.find({ productId: { $in: products.map(p => p._id) } }).populate('userId', 'name');
+    res.json({ supplier, products, reviews, totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) });
 }));
 
 // --- 11. SOCKET.IO MASTER SERVER ---
@@ -318,6 +352,11 @@ io.on('connection', (socket) => {
 
   socket.on('mark_read', async (data) => {
     await Message.updateMany({ chatId: data.chatId, sender: { $ne: data.userId }, status: { $ne: 'seen' } }, { $set: { status: 'seen' } });
+    const currentChat = await Chat.findById(data.chatId);
+    if(currentChat) {
+        const otherUser = currentChat.participants.find(p => p.toString() !== data.userId);
+        if(otherUser) io.to(otherUser.toString()).emit('messages_seen', { chatId: data.chatId });
+    }
   });
 });
 
@@ -339,7 +378,7 @@ setInterval(async () => {
 
 const PORT = 80;
 server.listen(PORT, () => {
-    console.log(`\n🚀 MASTER NODE v5.0 ONLINE`);
+    console.log(`\n🚀 MASTER NODE v5.1 ONLINE`);
     console.log(`📡 PORT: ${PORT} | STORAGE: 30TB BIND MOUNT`);
     console.log(`🛡️ SECURITY: Neural Scan & Spam Filter Active\n`);
 });
