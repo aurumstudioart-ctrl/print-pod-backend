@@ -97,7 +97,7 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
     const { name, basePrice, supplierId, variations, tags } = req.body;
     if (!req.files || !req.files['images']) return res.status(400).send("Primary asset missing.");
 
-    // A. Neural Copyright Scan
+    // A. Neural Copyright Scan (Sharp Fingerprinting)
     const primaryImg = req.files['images'][0];
     const buffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
     const hash = buffer.toString('base64');
@@ -107,6 +107,7 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
     }
 
     const config = await getAppConfig();
+
     const newProd = new Product({
         ...req.body,
         supplier: supplierId,
@@ -132,6 +133,7 @@ app.get(['/api/products/search', '/api/product/search'], safeQuery(async (req, r
 
     const products = await Product.find(query).populate('supplier', 'name').lean();
     
+    // ALGORITHM: View-Velocity + Sales + Handmade Boost
     const scored = products.map(p => {
         const recentViews = (p.views24h || []).filter(v => new Date(v) > (Date.now() - 86400000)).length;
         const score = (recentViews * 2) + ((p.salesCount || 0) * 10) + (p.source === 'handmade' ? 100 : 0);
@@ -185,6 +187,7 @@ app.post('/api/wallet/pay', safeQuery(async (req, res) => {
 
 app.post('/api/wallet/withdraw', safeQuery(async (req, res) => {
     const { userId, amount } = req.body;
+    // 🛡️ HOLD LOGIC: Immediate deduction on request
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     await new Withdrawal({ user: userId, amount, status: 'pending' }).save();
     res.json({ message: "Funds placed on hold for verification." });
@@ -199,6 +202,7 @@ app.post('/api/admin/withdrawals/action', safeQuery(async (req, res) => {
     const { id, action } = req.body;
     const request = await Withdrawal.findById(id);
     if (action === 'rejected') {
+        // 🔄 REFUND LOGIC: Return funds if rejected
         await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
     }
     request.status = action;
@@ -326,6 +330,7 @@ io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   
   socket.on('send_message', async (data) => {
+    // 🛡️ SPAM & CONTACT FILTER
     if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
         return io.to(data.senderId).emit('error_message', "⚠️ Blocked: Contact sharing forbidden.");
     }
@@ -350,35 +355,42 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 13. SUPPLIER PRODUCT PLUGIN APIs (NEW) 🛠️ ---
+// --- 13. SUPPLIER PRODUCT PLUGIN APIs (Update & Delete) 🛠️ ---
 
+// A. Update Product Details
 app.put('/api/product/update/:id', safeQuery(async (req, res) => {
     const { id } = req.params;
     const updateData = req.body;
+    
+    // Logic: Agar basePrice ya discount update ho rahi hai toh salePrice recalculate karo
     if (updateData.basePrice && updateData.discountPercentage) {
         updateData.salePrice = (updateData.basePrice * (1 - updateData.discountPercentage / 100)).toFixed(2);
     }
+    
     const updatedProduct = await Product.findByIdAndUpdate(id, updateData, { new: true });
     res.json({ message: "Product Optimized!", product: updatedProduct });
 }));
 
+// B. Delete Product (Cleanup Logic - Clears Disk Space) 🗑️
 app.delete('/api/product/delete/:id', safeQuery(async (req, res) => {
     const { id } = req.params;
     const product = await Product.findById(id);
     if (!product) return res.status(404).send("Asset not found");
 
+    // 🚩 PHYSICAL FILE CLEANUP: Delete from 30TB Storage
     if (product.imagePaths && product.imagePaths.length > 0) {
         product.imagePaths.forEach(imgName => {
             const fullPath = path.join('/app/uploads', imgName);
-            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); // Hard delete from disk
         });
     }
     if (product.videoPath) {
         const videoPath = path.join('/app/uploads', product.videoPath);
         if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
     }
+
     await Product.findByIdAndDelete(id);
-    res.json({ message: "Asset purged from Master Node and 30TB Disk." });
+    res.json({ message: "Asset purged from Master Node and Storage." });
 }));
 
 // --- 14. MASTER AUTOMATION ---
@@ -388,6 +400,7 @@ app.post('/api/admin/config', async (req, res) => {
     res.json({ success: true });
 });
 
+// Auto-Approve Quarantine Worker
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
