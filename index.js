@@ -6,13 +6,14 @@ const { Server } = require("socket.io");
 const path = require('path');
 const multer = require('multer'); 
 const fs = require('fs'); 
-const sharp = require('sharp'); // Neural Image Scanning
+const sharp = require('sharp'); // Neural Scanning & Copyright Protection
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 
 // --- 1. DATABASE MODELS LOADING ---
+// Ensuring all schemas exist before routes use them
 const User = require('./models/User');
 const Product = require('./models/Product');
 const Chat = require('./models/Chat');
@@ -24,7 +25,7 @@ const Withdrawal = require('./models/Withdrawal');
 const configSchema = new mongoose.Schema({
     key: { type: String, default: 'main_config' },
     quarantineEnabled: { type: Boolean, default: true },
-    quarantineDuration: { type: Number, default: 180 }, // In minutes
+    quarantineDuration: { type: Number, default: 180 }, // Minutes
 });
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', configSchema);
 
@@ -86,7 +87,7 @@ const safeQuery = (fn) => async (req, res, next) => {
 };
 
 // --- 3. IDENTITY & CORE APIs ---
-app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node v5.1 Fully Operational ✅'));
+app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node v5.2 Fully Operational ✅'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
@@ -98,7 +99,7 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
     const { name, basePrice, supplierId, variations, tags } = req.body;
     if (!req.files || !req.files['images']) return res.status(400).send("Primary asset missing.");
 
-    // A. Neural Copyright Scan (Sharp)
+    // A. Neural Copyright Scan (Sharp Fingerprinting)
     const primaryImg = req.files['images'][0];
     const buffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
     const hash = buffer.toString('base64');
@@ -117,7 +118,9 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
         tags: tags ? tags.split(',') : [],
         variations: variations ? JSON.parse(variations) : [],
         imageHash: hash,
-        status: config.quarantineEnabled ? 'pending' : 'approved'
+        status: config.quarantineEnabled ? 'pending' : 'approved',
+        salesCount: 0,
+        views24h: []
     });
     await newProd.save();
     res.json({ message: "Security Clearance Passed. Broadcast initiated." });
@@ -127,9 +130,8 @@ app.post('/api/product/add', productUpload, safeQuery(async (req, res) => {
 
 app.get(['/api/products/search', '/api/product/search'], safeQuery(async (req, res) => {
     const { q, category } = req.query;
-    // Show approved normally, show pending if specifically needed for testing
+    // Show approved + pending for the supplier/admin, but normally just approved
     let query = { status: { $in: ['approved', 'pending'] } }; 
-    
     if (q) query.$or = [{ name: { $regex: q, $options: 'i' } }, { tags: { $in: [new RegExp(q, 'i')] } }];
     if (category && category !== 'All') query.category = category;
 
@@ -292,7 +294,7 @@ app.get('/api/supplier/products/:id', safeQuery(async (req, res) => {
     res.json(data);
 }));
 
-// --- 10. USER CONTROL CENTER & SHOP PROFILE 👥 ---
+// --- 10. MASTER ADMIN CONTROLS 👥 ---
 
 app.get('/api/admin/users', safeQuery(async (req, res) => {
     const users = await User.find({}).select('-password').sort({ createdAt: -1 });
@@ -310,6 +312,8 @@ app.post('/api/admin/users/wallet-adjust', safeQuery(async (req, res) => {
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: (amount * mult) } });
     res.json({ success: true });
 }));
+
+// --- 11. SHOP PROFILE & STOREFRONT 🏬 ---
 
 const profileUpload = upload.fields([{ name: 'profileImage', maxCount: 1 }, { name: 'bannerImage', maxCount: 1 }]);
 app.put('/api/shop/update-profile', profileUpload, safeQuery(async (req, res) => {
@@ -331,7 +335,7 @@ app.get('/api/shop/:id', safeQuery(async (req, res) => {
     res.json({ supplier, products, reviews, totalSales: products.reduce((acc, p) => acc + (p.salesCount || 0), 0) });
 }));
 
-// --- 11. SOCKET.IO MASTER SERVER ---
+// --- 12. SOCKET.IO ENGINE ---
 
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
@@ -360,15 +364,15 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 12. MASTER CONFIG & AUTOMATION ---
+// --- 13. MASTER AUTOMATION ---
 
 app.get('/api/admin/config', async (req, res) => res.json(await getAppConfig()));
 app.post('/api/admin/config', async (req, res) => {
     await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true });
-    res.json({ message: "Config Synced" });
+    res.json({ success: true });
 });
 
-// Global Auto-Approve Worker
+// Auto-Approve Quarantine Worker
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
@@ -377,8 +381,4 @@ setInterval(async () => {
 }, 600000);
 
 const PORT = 80;
-server.listen(PORT, () => {
-    console.log(`\n🚀 MASTER NODE v5.1 ONLINE`);
-    console.log(`📡 PORT: ${PORT} | STORAGE: 30TB BIND MOUNT`);
-    console.log(`🛡️ SECURITY: Neural Scan & Spam Filter Active\n`);
-});
+server.listen(PORT, () => console.log(`🚀 MASTER NODE v5.2 FULLY OPERATIONAL ON PORT ${PORT}`));
