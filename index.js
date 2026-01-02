@@ -38,13 +38,13 @@ const reviewSchema = new mongoose.Schema({
 });
 const Review = mongoose.models.Review || mongoose.model('Review', reviewSchema);
 
-// --- 2. CONFIGURATION & LIMITS ---
+// --- 2. CONFIGURATION & SECURITY ---
 const PHONE_REGEX = /(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}/;
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB limit for sockets
+  maxHttpBufferSize: 5e7 // 50 MB
 });
 
 app.use(cors());
@@ -54,8 +54,8 @@ app.use('/uploads', express.static('/app/uploads'));
 
 // DB Connection
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ Master Database Linked & Verified"))
-    .catch(err => console.error("❌ DB Connection Error", err));
+    .then(() => console.log("✅ SYSTEM: Master Node DB Synced & Secured"))
+    .catch(err => console.error("❌ DB ERROR:", err));
 
 // Storage Setup
 const uploadDir = '/app/uploads';
@@ -63,9 +63,9 @@ if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir), 
-  filename: (req, file, cb) => { 
+  filename: (req, file, cb) => {
     const cleanName = file.originalname.replace(/\s+/g, '-');
-    cb(null, `pod-${Date.now()}-${cleanName}`); 
+    cb(null, `pod-${Date.now()}-${cleanName}`);
   }
 });
 const upload = multer({ storage });
@@ -77,11 +77,11 @@ const getAppConfig = async () => {
 };
 
 // --- 3. BASIC ROUTES ---
-app.get('/', (req, res) => res.status(200).send('🚀 POD Master Node v4.0 Operational ✅'));
+app.get('/', (req, res) => res.status(200).send('🚀 POD Super Master Node v5.0 | All Systems Nominal ✅'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/product', require('./routes/product'));
 
-// --- 4. PRODUCT ENGINE (Neural Scan + Sale System) ---
+// --- 4. PRODUCT ENGINE (Neural Scan + Management) ---
 const productAssets = upload.fields([{ name: 'images', maxCount: 12 }, { name: 'video', maxCount: 1 }]);
 
 app.post('/api/product/add', productAssets, async (req, res) => {
@@ -89,13 +89,14 @@ app.post('/api/product/add', productAssets, async (req, res) => {
         const { name, description, basePrice, supplierId, category, tags, source, isPhysical } = req.body;
         if (!req.files || !req.files['images']) return res.status(400).send("Images required.");
 
-        // Neural Scan for Copyright (Sharp)
+        // Neural Scan for Duplicate Design (Copyright Protection)
         const primaryImg = req.files['images'][0];
         const imageBuffer = await sharp(primaryImg.path).resize(10, 10).grayscale().toBuffer();
         const currentHash = imageBuffer.toString('base64');
 
-        const existing = await Product.findOne({ imageHash: currentHash });
-        if (existing) return res.status(403).json({ error: "Copyright Block", guide: "Design already exists." });
+        if (await Product.findOne({ imageHash: currentHash })) {
+            return res.status(403).json({ error: "Copyright Block", guide: "This design already exists in our database." });
+        }
 
         const config = await getAppConfig();
         const newProduct = new Product({
@@ -106,8 +107,17 @@ app.post('/api/product/add', productAssets, async (req, res) => {
             source, isPhysical: isPhysical === 'true', tags: tags ? tags.split(',') : []
         });
         await newProduct.save();
-        res.json({ message: "Neural Scan Passed! Product Uploaded." });
+        res.json({ message: "Neural Scan Passed! Product uploaded." });
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/supplier/products/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!id || id === 'undefined') return res.json([]);
+        const products = await Product.find({ supplier: id }).sort({ createdAt: -1 });
+        res.json(products);
+    } catch (err) { res.status(500).send(err.message); }
 });
 
 app.patch('/api/product/set-sale', async (req, res) => {
@@ -130,7 +140,6 @@ app.get('/api/products/search', async (req, res) => {
         if (category && category !== 'All') query.category = category;
 
         const products = await Product.find(query).populate('supplier', 'name').lean();
-        // Smart Ranking logic
         const results = products.map(p => ({
             ...p,
             score: (p.clickCount || 0) + (p.source === 'handmade' ? 100 : 0)
@@ -144,7 +153,7 @@ app.get('/api/admin/detailed-stats', async (req, res) => {
         const suppliers = await User.countDocuments({ role: 'supplier' });
         const sellers = await User.countDocuments({ role: 'seller' });
         const revenueTimeline = await Order.aggregate([
-            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, dailyRevenue: { $sum: "$totalPrice" }, orderCount: { $sum: 1 } } },
+            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, dailyRevenue: { $sum: "$totalPrice" } } },
             { $sort: { "_id": -1 } }, { $limit: 15 }
         ]);
         const supplierPerformance = await Order.aggregate([
@@ -153,25 +162,6 @@ app.get('/api/admin/detailed-stats', async (req, res) => {
             { $unwind: "$details" }
         ]);
         res.json({ userStats: { sellers, suppliers }, revenueTimeline, supplierPerformance });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-app.get('/api/supplier/stats/:id', async (req, res) => {
-    try {
-        const supplierId = req.params.id;
-        const user = await User.findById(supplierId);
-        const productsCount = await Product.countDocuments({ supplier: supplierId });
-        const orders = await Order.find({ supplierId: supplierId });
-        const approvedWithdrawals = await Withdrawal.aggregate([
-            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
-            { $group: { _id: null, total: { $sum: "$amount" } } }
-        ]);
-        res.json({ 
-            products: productsCount, 
-            balance: user?.walletBalance || 0, 
-            withdrawn: approvedWithdrawals[0]?.total || 0, 
-            pendingOrders: orders.filter(o => o.status === 'pending').length 
-        });
     } catch (err) { res.status(500).send(err.message); }
 });
 
@@ -201,7 +191,7 @@ app.put('/api/shop/update-profile', profileUpload, async (req, res) => {
             }
         }
         await User.findByIdAndUpdate(userId, { $set: updateData });
-        res.json({ message: "Sync Successful 🚀" });
+        res.json({ message: "Shop updated successfully!" });
     } catch (err) { res.status(500).send(err.message); }
 });
 
@@ -215,25 +205,15 @@ app.get('/api/shop/:id', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 7. WITHDRAWAL & WALLET ---
+// --- 7. WALLET & WITHDRAWALS (Fixed 404s) ---
 
-app.get('/api/admin/withdrawals', async (req, res) => {
+app.get('/api/wallet/:userId', async (req, res) => {
     try {
-        const data = await Withdrawal.find().populate('user', 'name email role walletBalance').sort({ createdAt: -1 });
-        res.json(data);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/admin/withdrawals/action', async (req, res) => {
-    try {
-        const { id, action } = req.body;
-        const request = await Withdrawal.findById(id);
-        if (!request || request.status !== 'pending') return res.status(400).send("Invalid");
-        if (action === 'rejected') await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
-        request.status = action;
-        await request.save();
-        res.json({ message: "Action Successful" });
-    } catch (err) { res.status(500).send(err.message); }
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined') return res.json({ balance: 0 });
+        const user = await User.findById(userId);
+        res.json({ balance: user ? user.walletBalance : 0 });
+    } catch (err) { res.status(500).json({ error: "Wallet not found" }); }
 });
 
 app.post('/api/wallet/withdraw', async (req, res) => {
@@ -243,56 +223,59 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
     const newReq = new Withdrawal({ user: userId, amount, status: 'pending' });
     await newReq.save();
-    res.json({ message: "Request Submitted" });
+    res.json({ message: "Withdrawal request submitted!" });
 });
 
-// --- 8. ORDERS SYSTEM ---
-
-app.get('/api/orders/supplier/:id', async (req, res) => {
-    try {
-        const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
-        res.json(data);
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-app.post('/api/orders/create', async (req, res) => {
-    try {
-        const newOrder = new Order(req.body);
-        await newOrder.save();
-        res.json({ message: "Order Success", orderId: newOrder._id });
-    } catch (err) { res.status(500).send(err.message); }
-});
-
-// --- 9. CHAT ENGINE & SOCKETS ---
+// --- 8. CHAT ENGINE (Fixed 404s & History) ---
 
 app.get('/api/chat/conversations/:userId', async (req, res) => {
     try {
-        const data = await Chat.find({ participants: req.params.userId }).populate('participants', 'name email role').sort({ lastMessageTime: -1 });
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined') return res.json([]);
+        const data = await Chat.find({ participants: userId }).populate('participants', 'name email role').sort({ lastMessageTime: -1 });
         res.json(data);
-    } catch (err) { res.status(500).send(err.message); }
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/chat/messages/:chatId', async (req, res) => {
+    try {
+        const { chatId } = req.params;
+        if (!chatId || chatId === 'undefined') return res.json([]);
+        const messages = await Message.find({ chatId }).sort({ createdAt: 1 });
+        res.json(messages);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/chat/unread/:userId', async (req, res) => {
     try {
-        const chats = await Chat.find({ participants: req.params.userId });
-        const unread = await Message.find({ chatId: { $in: chats.map(c=>c._id) }, sender: { $ne: req.params.userId }, status: { $ne: 'seen' } });
+        const { userId } = req.params;
+        if (!userId || userId === 'undefined') return res.json({ total: 0, perChat: {} });
+        const chats = await Chat.find({ participants: userId });
+        const unread = await Message.find({ chatId: { $in: chats.map(c=>c._id) }, sender: { $ne: userId }, status: { $ne: 'seen' } });
         const unreadMap = {};
         unread.forEach(msg => { unreadMap[msg.chatId] = (unreadMap[msg.chatId] || 0) + 1; });
         res.json({ total: unread.length, perChat: unreadMap });
-    } catch (err) { res.status(500).send(err.message); }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// --- 9. SOCKET LOGIC (Security + Live Updates) ---
 
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   
   socket.on('send_message', async (data) => {
-    // Security Block for Phone/Email
+    // Security Block
     if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
-        return io.to(data.senderId).emit('error_message', "⚠️ Security Blocked: Contact sharing not allowed.");
+        return io.to(data.senderId).emit('error_message', "⚠️ Security: Contact sharing is not allowed.");
     }
     
     let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
-    if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); await chat.save(); }
+    if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); }
+    
+    // Update Chat Preview
+    chat.lastMessage = data.text || '📷 Media'; 
+    chat.lastMessageTime = Date.now(); 
+    await chat.save();
     
     const newMessage = new Message({ ...data, chatId: chat._id, status: 'delivered' }); 
     await newMessage.save();
@@ -306,24 +289,13 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 10. AUTOMATION & CONFIG ---
-
-app.get('/api/admin/config', async (req, res) => {
-    const config = await getAppConfig();
-    res.json(config);
-});
-
-app.post('/api/admin/config', async (req, res) => {
-    const config = await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true, new: true });
-    res.json(config);
-});
-
+// --- 10. AUTOMATION ---
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
     const cutoff = new Date(Date.now() - config.quarantineDuration * 60 * 1000);
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
-}, 600000); // Har 10 min mein check karega
+}, 600000);
 
 const PORT = 80;
-server.listen(PORT, () => console.log(`🚀 Master Node Operational on Port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 MASTER NODE v5.0 operational on Port ${PORT}`));
