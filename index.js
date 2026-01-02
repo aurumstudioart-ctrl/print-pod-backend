@@ -44,7 +44,7 @@ const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 5e7 // 50 MB
+  maxHttpBufferSize: 5e7 // 50 MB limit
 });
 
 app.use(cors());
@@ -165,6 +165,25 @@ app.get('/api/admin/detailed-stats', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
+app.get('/api/supplier/stats/:id', async (req, res) => {
+    try {
+        const supplierId = req.params.id;
+        const user = await User.findById(supplierId);
+        const productsCount = await Product.countDocuments({ supplier: supplierId });
+        const orders = await Order.find({ supplierId: supplierId });
+        const approvedWithdrawals = await Withdrawal.aggregate([
+            { $match: { user: new mongoose.Types.ObjectId(supplierId), status: 'approved' } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
+        res.json({ 
+            products: productsCount, 
+            balance: user?.walletBalance || 0, 
+            withdrawn: approvedWithdrawals[0]?.total || 0, 
+            pendingOrders: orders.filter(o => o.status === 'pending').length 
+        });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
 // --- 6. SHOP PROFILE & BANNER SYSTEM ---
 
 const profileUpload = upload.fields([{ name: 'profileImage', maxCount: 1 }, { name: 'bannerImage', maxCount: 1 }]);
@@ -205,7 +224,7 @@ app.get('/api/shop/:id', async (req, res) => {
     } catch (err) { res.status(500).send(err.message); }
 });
 
-// --- 7. WALLET & WITHDRAWALS (Fixed 404s) ---
+// --- 7. WALLET & WITHDRAWALS ---
 
 app.get('/api/wallet/:userId', async (req, res) => {
     try {
@@ -226,7 +245,43 @@ app.post('/api/wallet/withdraw', async (req, res) => {
     res.json({ message: "Withdrawal request submitted!" });
 });
 
-// --- 8. CHAT ENGINE (Fixed 404s & History) ---
+app.get('/api/admin/withdrawals', async (req, res) => {
+    try {
+        const data = await Withdrawal.find().populate('user', 'name email role walletBalance').sort({ createdAt: -1 });
+        res.json(data);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/withdrawals/action', async (req, res) => {
+    try {
+        const { id, action } = req.body;
+        const request = await Withdrawal.findById(id);
+        if (!request || request.status !== 'pending') return res.status(400).send("Invalid request");
+        if (action === 'rejected') await User.findByIdAndUpdate(request.user, { $inc: { walletBalance: request.amount } });
+        request.status = action;
+        await request.save();
+        res.json({ message: "Action Successful" });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 8. ORDERS SYSTEM ---
+
+app.get('/api/orders/supplier/:id', async (req, res) => {
+    try {
+        const data = await Order.find({ supplierId: req.params.id }).populate('sellerId', 'name email').populate('productId', 'name').sort({ createdAt: -1 });
+        res.json(data);
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+app.post('/api/orders/create', async (req, res) => {
+    try {
+        const newOrder = new Order(req.body);
+        await newOrder.save();
+        res.json({ message: "Order Success", orderId: newOrder._id });
+    } catch (err) { res.status(500).send(err.message); }
+});
+
+// --- 9. CHAT ENGINE (Fixed 404s & History) ---
 
 app.get('/api/chat/conversations/:userId', async (req, res) => {
     try {
@@ -258,13 +313,12 @@ app.get('/api/chat/unread/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 9. SOCKET LOGIC (Security + Live Updates) ---
+// --- 10. SOCKET LOGIC (Security + Live Updates) ---
 
 io.on('connection', (socket) => {
   socket.on('join_room', (userId) => socket.join(userId));
   
   socket.on('send_message', async (data) => {
-    // Security Block
     if (data.text && (PHONE_REGEX.test(data.text) || EMAIL_REGEX.test(data.text))) {
         return io.to(data.senderId).emit('error_message', "⚠️ Security: Contact sharing is not allowed.");
     }
@@ -272,7 +326,6 @@ io.on('connection', (socket) => {
     let chat = await Chat.findOne({ participants: { $all: [data.senderId, data.receiverId] } });
     if (!chat) { chat = new Chat({ participants: [data.senderId, data.receiverId] }); }
     
-    // Update Chat Preview
     chat.lastMessage = data.text || '📷 Media'; 
     chat.lastMessageTime = Date.now(); 
     await chat.save();
@@ -289,13 +342,24 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- 10. AUTOMATION ---
+// --- 11. ADMIN CONFIG & AUTOMATION ---
+
+app.get('/api/admin/config', async (req, res) => {
+    const config = await getAppConfig();
+    res.json(config);
+});
+
+app.post('/api/admin/config', async (req, res) => {
+    const config = await SystemConfig.findOneAndUpdate({ key: 'main_config' }, req.body, { upsert: true, new: true });
+    res.json(config);
+});
+
 setInterval(async () => {
     const config = await getAppConfig();
     if (!config.quarantineEnabled) return;
     const cutoff = new Date(Date.now() - config.quarantineDuration * 60 * 1000);
     await Product.updateMany({ status: 'pending', createdAt: { $lte: cutoff } }, { $set: { status: 'approved' } });
-}, 600000);
+}, 600000); // Runs every 10 mins
 
-const PORT = 80;
+const PORT = process.env.PORT || 80;
 server.listen(PORT, () => console.log(`🚀 MASTER NODE v5.0 operational on Port ${PORT}`));
